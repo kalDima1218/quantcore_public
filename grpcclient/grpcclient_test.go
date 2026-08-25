@@ -2,6 +2,7 @@ package grpcclient
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -69,7 +70,7 @@ func TestGetConnChecksClosedBeforeReadyFastPath(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
-	if _, err := c.GetConn(ctx); err != ErrClosed {
+	if _, err := c.GetConn(ctx); !errors.Is(err, ErrClosed) {
 		t.Fatalf("GetConn = %v, want ErrClosed (ready=true but closed=true must not win)", err)
 	}
 }
@@ -137,7 +138,7 @@ func TestGetConnSettlesClosedUnderConcurrentReadyFlicker(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 		_, err := c.GetConn(ctx)
 		cancel()
-		if err != ErrClosed {
+		if !errors.Is(err, ErrClosed) {
 			t.Fatalf("GetConn after settling = %v, want ErrClosed", err)
 		}
 	}
