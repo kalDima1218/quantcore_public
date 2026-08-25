@@ -1,0 +1,48 @@
+version: "2"
+
+run:
+  timeout: 5m
+
+linters:
+  default: none
+  enable:
+    # Correctness — the class of bug this codebase has paid for before (lost quota
+    # spends, ghost orders, silent leg desync).
+    - govet
+    - staticcheck
+    - errcheck
+    - ineffassign
+    - unused
+    - errorlint # errors.Is/As vs == / type assertion
+    - nilerr # returning nil after checking err != nil
+    - nilnil # returning (nil, nil) from an (T, error) func — a broker adapter footgun
+    - bodyclose
+    - copyloopvar
+    - unconvert
+    - unparam
+    - gocritic
+    - misspell
+    - gosec
+    - prealloc
+
+  settings:
+    errcheck:
+      exclude-functions:
+        # log writes: a failed write to the module log has nowhere else to report to.
+        - (*QuantCore/modlog.Logger).Printf
+    gosec:
+      excludes:
+        - G404 # math/rand: used only for jitter/client-id nonces, never crypto
+    gocritic:
+      disabled-checks:
+        - ifElseChain # this codebase's guard-clause style over if/else chains is deliberate
+        - commentedOutCode # false-positives on the WHY comments
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
