@@ -202,7 +202,7 @@ func (p *placer) placeResolved(kind orderKind, symbol string, lots int, price fl
 	// Neither the placement nor the resolution could reach the broker: report failure —
 	// the engine's own machinery (backoff / hedge debt / reconcile) owns the wait. If a
 	// ghost did land, reconcile will surface it.
-	p.logf("CRITICAL: client id %s UNRESOLVED (order list unreachable) — reporting the placement as failed; reconcile is the net if a ghost landed", cid)
+	p.critical("client id %s UNRESOLVED (order list unreachable) — reporting the placement as failed; reconcile is the net if a ghost landed", cid)
 	return "", fmt.Errorf("placement unresolved (transport error and order list unreachable): %w", err)
 }
 

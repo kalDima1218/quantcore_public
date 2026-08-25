@@ -113,13 +113,13 @@ func (e *Engine) confirmDeadTaker(orderID string, acct *ordAcct) {
 // and then killing our hedges, and re-hedging forever is churn, not progress.
 func (e *Engine) settleTaker(orderID string, acct *ordAcct, executed int) {
 	if acct.placed > 0 && executed > acct.placed {
-		e.logf("CRITICAL: taker %s terminal executed count %d exceeds its placed size %d — clamping (corrupt ack?)", orderID, executed, acct.placed)
+		e.critical("taker %s terminal executed count %d exceeds its placed size %d — clamping (corrupt ack?)", orderID, executed, acct.placed)
 		executed = acct.placed
 	}
 	if executed < acct.seen {
 		// The broker's terminal count contradicts its own fill stream downward. The stream's
 		// lots are real (they were credited and are part of the hedged book); keep them.
-		e.logf("CRITICAL: taker %s terminal executed count %d is BELOW the %d lots its fill stream reported — keeping the stream's count (broker self-contradiction; reconcile will confirm)", orderID, executed, acct.seen)
+		e.critical("taker %s terminal executed count %d is BELOW the %d lots its fill stream reported — keeping the stream's count (broker self-contradiction; reconcile will confirm)", orderID, executed, acct.seen)
 		executed = acct.seen
 	}
 	acct.final = executed
@@ -143,11 +143,11 @@ func (e *Engine) settleTaker(orderID string, acct *ordAcct, executed int) {
 		// book naked until an operator arrived. Autonomous middle: the shortfall becomes a
 		// DEBT paid at the impaired backoff pace — the engine pulls its orders and keeps
 		// re-trying the hedge, however long the broker misbehaves.
-		e.logf("CRITICAL: taker %s died with %d/%d lots executed on %s — %d consecutive takers confirmed dead short; slowing re-hedges to the impaired debt pace", orderID, executed, acct.placed, acct.sym, e.recovery.takerDeadStreak)
+		e.critical("taker %s died with %d/%d lots executed on %s — %d consecutive takers confirmed dead short; slowing re-hedges to the impaired debt pace", orderID, executed, acct.placed, acct.sym, e.recovery.takerDeadStreak)
 		e.deferHedge(acct.sym, acct.isBuy, shortfall)
 		return
 	}
-	e.logf("CRITICAL: taker %s died with %d/%d lots executed on %s — credit reversed; re-hedging the %d-lot shortfall", orderID, executed, acct.placed, acct.sym, shortfall)
+	e.critical("taker %s died with %d/%d lots executed on %s — credit reversed; re-hedging the %d-lot shortfall", orderID, executed, acct.placed, acct.sym, shortfall)
 	e.takerRetry(acct.sym, acct.isBuy, shortfall)
 }
 
@@ -198,7 +198,7 @@ func (e *Engine) hedgeStrayMakerFill(orderID, symbol string, buy bool, lots int)
 		return
 	}
 	if e.recovery.halted {
-		e.logf("CRITICAL: own passive %s filled %d on %s while halted — NOT hedged (kill-switch); hedge manually", orderID, lots, symbol)
+		e.critical("own passive %s filled %d on %s while halted — NOT hedged (kill-switch); hedge manually", orderID, lots, symbol)
 		return
 	}
 	// LegB → LegA at a ratio has no whole-lot answer: R contracts of LegB are one LegA lot,
@@ -208,7 +208,7 @@ func (e *Engine) hedgeStrayMakerFill(orderID, symbol string, buy bool, lots int)
 	// guess" rule the deferred-retire path follows. Unreachable in practice: a ratio requires
 	// SoloMakerLeg, which never rests a LegB passive, and takers never reach this valve.
 	if symbol == e.cfg.LegB && e.hedgeRatio() > 1 {
-		e.logf("CRITICAL: stray passive fill of %d on LegB %s (order %s) at hedge ratio %d cannot be converted to whole LegA lots — NOT hedged; the book is naked by %d contracts, fix manually",
+		e.critical("stray passive fill of %d on LegB %s (order %s) at hedge ratio %d cannot be converted to whole LegA lots — NOT hedged; the book is naked by %d contracts, fix manually",
 			lots, symbol, orderID, e.hedgeRatio(), lots)
 		return
 	}
@@ -225,7 +225,7 @@ func (e *Engine) takerRetry(symbol string, buy bool, lots int) bool {
 		// The kill-switch is absolute. Callers pre-check halted, but a halt can fire MID
 		// sequence — settleClip issues up to two top-ups — so the choke point itself must
 		// refuse to trade.
-		e.logf("CRITICAL: taker %s (buy=%v x%d) suppressed while halted — NOT hedged (kill-switch); hedge manually", symbol, buy, lots)
+		e.critical("taker %s (buy=%v x%d) suppressed while halted — NOT hedged (kill-switch); hedge manually", symbol, buy, lots)
 		return false
 	}
 	return e.takerRetryFrom(symbol, buy, lots, 0)
@@ -278,7 +278,7 @@ func (e *Engine) takerRetryPlain(symbol string, buy bool, lots int, from int) bo
 			return true
 		}
 	}
-	e.logf("CRITICAL: taker %s (buy=%v x%d) failed %d attempts — queued as hedge debt; pulling orders and retrying until the broker answers", symbol, buy, lots, attempts)
+	e.critical("taker %s (buy=%v x%d) failed %d attempts — queued as hedge debt; pulling orders and retrying until the broker answers", symbol, buy, lots, attempts)
 	e.deferHedge(symbol, buy, lots)
 	return false
 }
@@ -361,7 +361,7 @@ func (e *Engine) commitTakerPlacement(symbol string, buy bool, lots int, id stri
 		// divergence exactly like any taker that dies unfilled. Retrying here instead
 		// would risk DOUBLING the hedge — the order most likely does exist. Until a
 		// clean reconcile pass CONFIRMS the position, it is unverified: no new clips.
-		e.logf("CRITICAL: taker %s (buy=%v x%d) returned an EMPTY order id — hedge credited blind at the touch; its fills cannot be tracked; new clips wait for a clean reconcile", symbol, buy, lots)
+		e.critical("taker %s (buy=%v x%d) returned an EMPTY order id — hedge credited blind at the touch; its fills cannot be tracked; new clips wait for a clean reconcile", symbol, buy, lots)
 		e.recovery.unverified = true
 		if e.sink != nil {
 			e.sink.Fill(symbol, buy, lots, e.crossPrice(symbol, buy))
@@ -376,7 +376,7 @@ func (e *Engine) commitTakerPlacement(symbol string, buy bool, lots int, id stri
 		// to the OLD order can no longer trigger a blind re-hedge. Fill attribution for
 		// this id is ambiguous from here on, so the position is unverified until a clean
 		// reconcile pass confirms it — no new clips before that.
-		e.logf("CRITICAL: broker REUSED order id %s for a taker %s (buy=%v x%d) — replacing its fill account; new clips wait for a clean reconcile", id, symbol, buy, lots)
+		e.critical("broker REUSED order id %s for a taker %s (buy=%v x%d) — replacing its fill account; new clips wait for a clean reconcile", id, symbol, buy, lots)
 		e.recovery.unverified = true
 	}
 	acct := &ordAcct{maker: false, sym: symbol, isBuy: buy, placed: lots, final: -1, placedAt: e.now} // taker: never re-hedged as stray

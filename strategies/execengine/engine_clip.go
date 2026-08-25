@@ -283,7 +283,7 @@ func (e *Engine) settleClip(realA, realB int, complete bool) {
 		return
 	}
 	if e.recovery.halted {
-		e.logf("CRITICAL: clip legs unbalanced at halt (legA=%d legB=%d want=%d) — NOT hedged (kill-switch); fix manually", realA, realB, want)
+		e.critical("clip legs unbalanced at halt (legA=%d legB=%d want=%d) — NOT hedged (kill-switch); fix manually", realA, realB, want)
 		return
 	}
 	if realA < want {
@@ -379,7 +379,7 @@ func (e *Engine) clipExecMode(in Intent) ExecMode {
 		}
 	}
 	if (mode == ExecDualPassive || mode == ExecSoloMakerLegB) && e.cfg.HedgeRatio > 1 {
-		e.logf("CRITICAL: clip asked for %s execution at HedgeRatio=%d — LegB cannot rest at a ratio (see EngineConfig.HedgeRatio); executing solo-maker on LegA instead", mode, e.cfg.HedgeRatio)
+		e.critical("clip asked for %s execution at HedgeRatio=%d — LegB cannot rest at a ratio (see EngineConfig.HedgeRatio); executing solo-maker on LegA instead", mode, e.cfg.HedgeRatio)
 		mode = ExecSoloMaker
 	}
 	return mode
@@ -489,7 +489,7 @@ func (e *Engine) openTakerOnlyClip(in Intent, dir int, lots int, ts time.Time) (
 		// tryPlaceTaker's other callers reach the kill-switch check through takerRetry;
 		// this path races placeTakerRPC directly for the first attempt, bypassing it — so
 		// the kill switch needs its own check here.
-		e.logf("CRITICAL: taker-only open %s/%s (x%d) suppressed while halted — NOT hedged (kill-switch); hedge manually", e.cfg.LegA, e.cfg.LegB, lots)
+		e.critical("taker-only open %s/%s (x%d) suppressed while halted — NOT hedged (kill-switch); hedge manually", e.cfg.LegA, e.cfg.LegB, lots)
 		return true, false
 	}
 	buyA := dir > 0
@@ -576,12 +576,12 @@ func (e *Engine) placeLeg(lo *legOrder, sym string, lots int) error {
 	// untracked ghost ever fills, its fill looks foreign (ignored) and reconcile flags the
 	// divergence.
 	if id == "" {
-		e.logf("CRITICAL: broker returned an EMPTY order id placing %s x%d — treating as failed; the order may rest untracked, so new clips wait for a clean reconcile", sym, lots)
+		e.critical("broker returned an EMPTY order id placing %s x%d — treating as failed; the order may rest untracked, so new clips wait for a clean reconcile", sym, lots)
 		e.recovery.unverified = true
 		return fmt.Errorf("broker returned an empty order id for %s", sym)
 	}
 	if e.own[id] != nil {
-		e.logf("CRITICAL: broker REUSED order id %s placing %s x%d — treating as failed to protect the existing order's fill account; the order may rest untracked, so new clips wait for a clean reconcile", id, sym, lots)
+		e.critical("broker REUSED order id %s placing %s x%d — treating as failed to protect the existing order's fill account; the order may rest untracked, so new clips wait for a clean reconcile", id, sym, lots)
 		e.recovery.unverified = true
 		return fmt.Errorf("broker reused order id %s for %s", id, sym)
 	}

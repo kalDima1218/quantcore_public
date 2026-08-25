@@ -112,7 +112,7 @@ func (e *Engine) finishRetire(orderID string, acct *ordAcct, executed int) {
 	// order's placement size is a corrupt ack, and folding it would top up / hedge lots
 	// that cannot exist at the broker.
 	if acct.placed > 0 && executed > acct.placed {
-		e.logf("CRITICAL: %s terminal executed count %d exceeds its placed size %d — clamping (corrupt ack?)", orderID, executed, acct.placed)
+		e.critical("%s terminal executed count %d exceeds its placed size %d — clamping (corrupt ack?)", orderID, executed, acct.placed)
 		executed = acct.placed
 	}
 	acct.final = executed
@@ -122,7 +122,7 @@ func (e *Engine) finishRetire(orderID string, acct *ordAcct, executed int) {
 	// just as well strand a naked leg — so the book keeps the acted-on hedges and the
 	// contradiction is only surfaced loudly; reconcile confirms which side was right.
 	if acct.final < acct.folded {
-		e.logf("CRITICAL: %s terminal executed count %d is BELOW the %d lots already acted on — the broker contradicts its own fill stream; the book may be over-hedged by %d (reconcile will confirm)", orderID, acct.final, acct.folded, acct.folded-acct.final)
+		e.critical("%s terminal executed count %d is BELOW the %d lots already acted on — the broker contradicts its own fill stream; the book may be over-hedged by %d (reconcile will confirm)", orderID, acct.final, acct.folded, acct.folded-acct.final)
 	}
 	// Lots learned ONLY from the cancel-ack (no fill event yet): credit them to the sink
 	// NOW, at the order's resting limit (exact for a passive), so the position the Decider

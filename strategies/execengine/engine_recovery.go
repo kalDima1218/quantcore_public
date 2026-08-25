@@ -22,7 +22,7 @@ func (e *Engine) enterImpaired(reason string) {
 	e.recovery.impaired = true
 	e.recovery.retryGap = e.placeBackoff()
 	e.recovery.nextRetryAt = e.now.Add(e.recovery.retryGap)
-	e.logf("IMPAIRED: %s — pulling all orders, suspending new clips; retrying outstanding obligations until the broker answers", reason)
+	e.warn("%s — pulling all orders, suspending new clips; retrying outstanding obligations until the broker answers", reason)
 }
 
 // deferRetire queues an order whose retirement the broker would not confirm (cancel
@@ -174,7 +174,7 @@ func (e *Engine) Halt(reason string) {
 		return
 	}
 	e.recovery.halted = true
-	e.logf("HALTED: %s (position=%d)", reason, e.Position())
+	e.critical("%s (position=%d)", reason, e.Position())
 	e.CancelClip()
 }
 
@@ -237,7 +237,7 @@ func (e *Engine) Reconcile(legAActual, legBActual int) {
 	// the position is doubted, and trading on a doubted position is guessing.
 	if !e.recovery.mismatchLogged {
 		e.recovery.mismatchLogged = true
-		e.logf("CRITICAL: POSITION MISMATCH persisted across two reconciles: legA have=%d want=%d, legB have=%d want=%d — new clips suspended until broker and internal positions agree again (position frozen, not auto-repaired; investigate if this does not clear)",
+		e.critical("POSITION MISMATCH persisted across two reconciles: legA have=%d want=%d, legB have=%d want=%d — new clips suspended until broker and internal positions agree again (position frozen, not auto-repaired; investigate if this does not clear)",
 			legAActual, pos, legBActual, wantB)
 	}
 }

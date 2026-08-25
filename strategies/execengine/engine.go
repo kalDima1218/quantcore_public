@@ -348,7 +348,7 @@ func (e *Engine) OnFill(ts time.Time, orderID, symbol string, buy bool, lots int
 	// excess-hedge path — either way the engine would double-hedge and double-count the
 	// position — so the impossible excess is dropped, loudly.
 	if over := acct.seen + lots - acct.placed; over > 0 && acct.placed > 0 {
-		e.logf("CRITICAL: %s reported %d lots beyond its placed size %d on %s — dropping the impossible excess (re-delivered fill?)", orderID, over, acct.placed, symbol)
+		e.critical("%s reported %d lots beyond its placed size %d on %s — dropping the impossible excess (re-delivered fill?)", orderID, over, acct.placed, symbol)
 		lots -= over
 		if lots <= 0 {
 			return
@@ -374,7 +374,7 @@ func (e *Engine) OnFill(ts time.Time, orderID, symbol string, buy bool, lots int
 		// the truth and say so loudly; reconcile confirms which legs are actually unbalanced.
 		if acct.final >= 0 {
 			if beyond := acct.seen - max(acct.final, reported); beyond > 0 {
-				e.logf("CRITICAL: taker %s filled %d lots BEYOND its confirmed terminal count %d on %s — the broker contradicts its own terminal ack; the book may be over-hedged (reconcile will confirm)", orderID, beyond, acct.final, symbol)
+				e.critical("taker %s filled %d lots BEYOND its confirmed terminal count %d on %s — the broker contradicts its own terminal ack; the book may be over-hedged (reconcile will confirm)", orderID, beyond, acct.final, symbol)
 				if e.sink != nil {
 					e.sink.Fill(acct.sym, acct.isBuy, beyond, price)
 					acct.credited += beyond
@@ -408,7 +408,7 @@ func (e *Engine) OnFill(ts time.Time, orderID, symbol string, buy bool, lots int
 			}
 		}
 		if excess > 0 {
-			e.logf("CRITICAL: %s filled %d lots BEYOND its terminal executed count on %s — pair-hedging the excess", orderID, excess, symbol)
+			e.critical("%s filled %d lots BEYOND its terminal executed count on %s — pair-hedging the excess", orderID, excess, symbol)
 			e.hedgeStrayMakerFill(orderID, symbol, buy, excess)
 		}
 		return // already acted on via retireOrder — the dedup that kills the churn
