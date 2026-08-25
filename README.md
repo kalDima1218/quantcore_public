@@ -19,7 +19,8 @@ and `go test ./...` all pass.
   account/margin, order book streaming, market-schedule polling).
 - `grpcclient` — a small generic gRPC connection wrapper (reconnect/backoff) used by
   the above.
-- `modlog` — a trivial per-module file+stderr logger.
+- `modlog` — a per-module file+stderr logger with typed severity (`Critical`/`Warn`)
+  for operationally critical events, alongside plain `Printf` for routine logging.
 
 ## What's deliberately NOT here
 
