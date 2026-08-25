@@ -640,6 +640,16 @@ func TestEngineHedgeRejectThenImpairedRecovery(t *testing.T) {
 // (первый — исполнился+ответ потерян, placer перехеджировал) -> брокер
 // оверхеджирован -> reconcile ФЛАГУЕТ (suspect), движок не торгует на
 // сомнительной позиции. Оператор чинит -> resume. Инвариант: НЕ молчит.
+//
+// Таймаут 25s (не 10s): placeResolved теперь ретраит ТЕМ ЖЕ client_order_id до
+// cidRetryRounds раз (2026-08-25, ревью quantcore_public#3 #1) прежде чем
+// сдаться — для мгновенно исполняющегося маркет-ордера (терминален сразу,
+// GetOrders его никогда не увидит) это НЕ спасает от оверхеджа, только
+// откладывает его: каждый раунд — реальная попытка постановки тем же cid
+// (коллизия -> AlreadyExists) плюс ghostProbes проб по ghostProbeGap. Только
+// после исчерпания всех раундов внешний retry-с-новым-cid (через deferHedge)
+// создаёт второй настоящий ордер, который reconcile и ловит — тем же путём,
+// что и раньше, просто на ~10s позже.
 func TestEngineLostHedgeResponseFlagsSuspect(t *testing.T) {
 	h := newEngineHarness(t, brokersim.Config{})
 	h.setBook(legA, 100, 50, 102, 50)
@@ -648,12 +658,13 @@ func TestEngineLostHedgeResponseFlagsSuspect(t *testing.T) {
 	h.setIntent(+1, false, 1)
 	h.waitFor("clip working", 5*time.Second, func(s engineSnap) bool { return s.working })
 	// Один потерянный ответ на постановку тейкера: маркет исполнится и исчезнет,
-	// placer «усыновить» тейкер не сможет (терминальный), перехеджирует -> оверхедж.
+	// placer «усыновить» тейкер не сможет (терминальный) даже после cid-ретраев,
+	// внешний retry с новым cid — оверхедж.
 	h.fault(brokersim.Fault{Method: "PlaceOrder", Action: "drop_after_apply", Count: 1})
 	h.publicPrint(legA, 100, 1, false)
 	// Движок обязан заметить оверхедж и уйти в suspect (двухпроходный reconcile),
 	// а НЕ продолжить как ни в чём не бывало.
-	h.waitFor("suspect (over-hedge flagged)", 10*time.Second, func(s engineSnap) bool { return s.suspect })
+	h.waitFor("suspect (over-hedge flagged)", 25*time.Second, func(s engineSnap) bool { return s.suspect })
 	h.assertNoSilentDivergence()
 	// Оператор приводит брокера к вере движка -> reconcile сходится -> resume.
 	h.hold()
