@@ -59,7 +59,7 @@ func TestZeroAndNegativeLotFillsAreNoOps(t *testing.T) {
 	if len(tk.calls) != 0 || len(m.calls) > 2 {
 		t.Fatalf("no orders may move on empty fills, taker=%v maker=%v", tk.calls, m.calls)
 	}
-	if acct := e.own[bidA]; acct.seen != 0 || acct.folded != 0 {
+	if acct := e.own[bidA]; acct.Seen != 0 || acct.Folded != 0 {
 		t.Fatalf("accounts must not move on empty fills, got %+v", acct)
 	}
 }
@@ -117,8 +117,8 @@ func TestRandomizedEventStormKeepsLegsPaired(t *testing.T) {
 			// dedicated test above and would legitimately unpair the book).
 			syncAcks := func() {
 				for id, acct := range e.own {
-					if acct.maker && acct.final < 0 && m.executed[id] < acct.seen {
-						m.executed[id] = acct.seen
+					if acct.Maker && acct.Final < 0 && m.executed[id] < acct.Seen {
+						m.executed[id] = acct.Seen
 					}
 				}
 			}
@@ -127,14 +127,14 @@ func TestRandomizedEventStormKeepsLegsPaired(t *testing.T) {
 			liveMakers := func() []string {
 				var ids []string
 				for id, acct := range e.own {
-					if !acct.maker {
+					if !acct.Maker {
 						continue
 					}
-					limit := acct.placed
-					if acct.final >= 0 {
-						limit = acct.final
+					limit := acct.Placed
+					if acct.Final >= 0 {
+						limit = acct.Final
 					}
-					if acct.seen < limit {
+					if acct.Seen < limit {
 						ids = append(ids, id)
 					}
 				}
@@ -170,15 +170,15 @@ func TestRandomizedEventStormKeepsLegsPaired(t *testing.T) {
 					}
 					id := ids[rng.Intn(len(ids))]
 					acct := e.own[id]
-					limit := acct.placed
-					if acct.final >= 0 {
-						limit = acct.final
+					limit := acct.Placed
+					if acct.Final >= 0 {
+						limit = acct.Final
 					}
-					lots := 1 + rng.Intn(limit-acct.seen)
-					if acct.final < 0 && m.executed[id] < acct.seen+lots {
-						m.executed[id] = acct.seen + lots // the ack keeps up with the stream
+					lots := 1 + rng.Intn(limit-acct.Seen)
+					if acct.Final < 0 && m.executed[id] < acct.Seen+lots {
+						m.executed[id] = acct.Seen + lots // the ack keeps up with the stream
 					}
-					e.OnFill(ts, id, acct.sym, acct.isBuy, lots, acct.price)
+					e.OnFill(ts, id, acct.Sym, acct.IsBuy, lots, acct.Price)
 				case 7: // arm a cancel-catch: resting lots that will fill during a future cancel
 					ids := liveMakers()
 					if len(ids) == 0 {
@@ -186,8 +186,8 @@ func TestRandomizedEventStormKeepsLegsPaired(t *testing.T) {
 					}
 					id := ids[rng.Intn(len(ids))]
 					acct := e.own[id]
-					if acct.final < 0 && m.executed[id] < acct.placed {
-						m.executed[id] += 1 + rng.Intn(acct.placed-m.executed[id])
+					if acct.Final < 0 && m.executed[id] < acct.Placed {
+						m.executed[id] += 1 + rng.Intn(acct.Placed-m.executed[id])
 					}
 				case 8: // the clock advances — the fill-timeout backstop may fire
 					e.OnTick(ts)
@@ -197,7 +197,7 @@ func TestRandomizedEventStormKeepsLegsPaired(t *testing.T) {
 						continue
 					}
 					id := ids[rng.Intn(len(ids))]
-					if acct := e.own[id]; acct.final < 0 {
+					if acct := e.own[id]; acct.Final < 0 {
 						e.OnOrderStatus(id, true)
 					}
 				}

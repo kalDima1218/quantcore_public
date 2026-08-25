@@ -8,6 +8,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"QuantCore/strategies/execengine/orderregistry"
 )
 
 // --- untrustable broker responses: empty and reused order ids ---
@@ -78,7 +80,7 @@ func TestReusedMakerIDAbortsWithoutClobberingAccount(t *testing.T) {
 		t.Fatalf("a reused-id placement must abort the open, working=%v halted=%v", e.Working(), e.Halted())
 	}
 	acct := e.own["b1"]
-	if acct == nil || acct.sym != testLegA || !acct.isBuy {
+	if acct == nil || acct.Sym != testLegA || !acct.IsBuy {
 		t.Fatalf("legA's fill account must survive the collision intact, got %+v", acct)
 	}
 	if m.count("cancel b1") != 1 {
@@ -454,7 +456,7 @@ func TestRetireOrderStatusFallbackOnCancelError(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
 	e := newTestEngine(m, tk, 4)
 	id, _ := m.PlaceBid(testLegA, 4, 100)
-	e.own[id] = &ordAcct{maker: true, final: -1}
+	e.own[id] = &orderregistry.OrdAcct{Maker: true, Final: -1}
 
 	m.cancelErr = map[string]error{id: errors.New("order already done")}
 	m.status = map[string]int{id: 4} // broker: 4 lots executed, terminal
@@ -477,7 +479,7 @@ func TestRetireOrderDefersWhenTruthUnreachable(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
 	e := newTestEngine(m, tk, 4)
 	id, _ := m.PlaceBid(testLegA, 4, 100)
-	e.own[id] = &ordAcct{maker: true, final: -1}
+	e.own[id] = &orderregistry.OrdAcct{Maker: true, Final: -1}
 
 	m.cancelErr = map[string]error{id: errors.New("rpc down")}
 	// no m.status entry → Status errors too
@@ -504,16 +506,16 @@ func TestRetireOrderReturnsUnfoldedGapOnce(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
 	e := newTestEngine(m, tk, 4)
 	id, _ := m.PlaceBid(testLegA, 4, 100)
-	acct := &ordAcct{maker: true, final: -1}
+	acct := &orderregistry.OrdAcct{Maker: true, Final: -1}
 	e.own[id] = acct
 
-	acct.folded = 1 // one lot already processed via a live fill event
+	acct.Folded = 1 // one lot already processed via a live fill event
 	m.executed = map[string]int{id: 3}
 
 	if gap := e.retireOrder(id); gap != 2 {
 		t.Fatalf("gap=%d want 2 (3 executed − 1 already folded)", gap)
 	}
-	if acct.final != 3 || acct.folded != 3 {
+	if acct.Final != 3 || acct.Folded != 3 {
 		t.Fatalf("acct=%+v want final=3 folded=3", acct)
 	}
 }
@@ -526,7 +528,7 @@ func TestCancelTransientFailureRetriesWithoutStatus(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
 	e := newTestEngine(m, tk, 4)
 	id, _ := m.PlaceBid(testLegA, 4, 100)
-	e.own[id] = &ordAcct{maker: true, sym: testLegA, isBuy: true, price: 100, final: -1}
+	e.own[id] = &orderregistry.OrdAcct{Maker: true, Sym: testLegA, IsBuy: true, Price: 100, Final: -1}
 	m.cancelErrOnce = map[string]error{id: errors.New("rpc blip")}
 	m.executed = map[string]int{id: 3}
 

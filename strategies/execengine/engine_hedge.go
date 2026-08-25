@@ -7,6 +7,8 @@ package execengine
 
 import (
 	"time"
+
+	"QuantCore/strategies/execengine/orderregistry"
 )
 
 // takerConfirmAfter is how long a placed taker may go without confirming fill events
@@ -17,10 +19,6 @@ func (e *Engine) takerConfirmAfter() time.Duration {
 	}
 	return 10 * time.Second
 }
-
-// takerConfirmed reports whether a taker account's placement credit has been confirmed by
-// data: the fill stream covered its placed size, or a terminal status settled it.
-func takerConfirmed(acct *ordAcct) bool { return acct.final >= 0 || acct.seen >= acct.placed }
 
 // checkPendingTakers is the confirmation watchdog for placed takers. The engine's model
 // books a placed taker as done the moment it is accepted — necessary so the cap position
@@ -35,29 +33,29 @@ func takerConfirmed(acct *ordAcct) bool { return acct.final >= 0 || acct.seen >=
 func (e *Engine) checkPendingTakers(now time.Time) {
 	for id := range e.pending {
 		acct := e.own[id]
-		if acct == nil || acct.final >= 0 {
+		if acct == nil || acct.Final >= 0 {
 			delete(e.pending, id)
 			continue
 		}
-		if acct.seen >= acct.placed {
+		if acct.Seen >= acct.Placed {
 			// The fill stream confirmed every placed lot — the terminal count is known by
 			// arithmetic (an order can never execute beyond its placed size).
-			acct.final = acct.placed
+			acct.Final = acct.Placed
 			e.recovery.ResetDeadStreak()
 			delete(e.pending, id)
 			continue
 		}
-		if !acct.deadSeen && now.Sub(acct.placedAt) < e.takerConfirmAfter() {
+		if !acct.DeadSeen && now.Sub(acct.PlacedAt) < e.takerConfirmAfter() {
 			continue // inside the confirm window — give the fill stream its normal latency
 		}
-		if !acct.lastProbe.IsZero() && now.Sub(acct.lastProbe) < takerProbeEvery {
+		if !acct.LastProbe.IsZero() && now.Sub(acct.LastProbe) < takerProbeEvery {
 			continue
 		}
-		acct.lastProbe = now
-		if !acct.probeLogged {
-			acct.probeLogged = true
+		acct.LastProbe = now
+		if !acct.ProbeLogged {
+			acct.ProbeLogged = true
 			e.logf("taker %s (%s buy=%v) unconfirmed: %d/%d lots seen after %s — polling status; new clips wait for confirmation",
-				id, acct.sym, acct.isBuy, acct.seen, acct.placed, now.Sub(acct.placedAt))
+				id, acct.Sym, acct.IsBuy, acct.Seen, acct.Placed, now.Sub(acct.PlacedAt))
 		}
 		executed, terminal, err := e.maker.Status(id)
 		if err != nil {
@@ -79,10 +77,10 @@ func (e *Engine) checkPendingTakers(now time.Time) {
 func (e *Engine) awaitingTaker(now time.Time) bool {
 	for id := range e.pending {
 		acct := e.own[id]
-		if acct == nil || takerConfirmed(acct) {
+		if acct == nil || acct.Confirmed() {
 			continue
 		}
-		if acct.deadSeen || now.Sub(acct.placedAt) >= e.takerConfirmAfter() {
+		if acct.DeadSeen || now.Sub(acct.PlacedAt) >= e.takerConfirmAfter() {
 			return true
 		}
 	}
@@ -94,10 +92,10 @@ func (e *Engine) awaitingTaker(now time.Time) bool {
 // must come from data, not assumption). If the count cannot be read or the broker does not
 // yet agree the order is terminal, the taker is flagged so the watchdog treats it as
 // overdue immediately — new clips wait while it keeps probing.
-func (e *Engine) confirmDeadTaker(orderID string, acct *ordAcct) {
+func (e *Engine) confirmDeadTaker(orderID string, acct *orderregistry.OrdAcct) {
 	executed, terminal, err := e.maker.Status(orderID)
 	if err != nil || !terminal {
-		acct.deadSeen = true
+		acct.DeadSeen = true
 		e.logf("own taker %s reported dead but its executed count is unconfirmed (err=%v terminal=%v) — suspending new clips and polling until the broker answers", orderID, err, terminal)
 		return
 	}
@@ -111,20 +109,20 @@ func (e *Engine) confirmDeadTaker(orderID string, acct *ordAcct) {
 // and the shortfall is re-hedged with a fresh taker so the book returns to 1:1. A streak
 // of takerDeadLimit consecutive dead-short takers halts instead: the broker is accepting
 // and then killing our hedges, and re-hedging forever is churn, not progress.
-func (e *Engine) settleTaker(orderID string, acct *ordAcct, executed int) {
-	if acct.placed > 0 && executed > acct.placed {
-		e.critical("taker %s terminal executed count %d exceeds its placed size %d — clamping (corrupt ack?)", orderID, executed, acct.placed)
-		executed = acct.placed
+func (e *Engine) settleTaker(orderID string, acct *orderregistry.OrdAcct, executed int) {
+	if acct.Placed > 0 && executed > acct.Placed {
+		e.critical("taker %s terminal executed count %d exceeds its placed size %d — clamping (corrupt ack?)", orderID, executed, acct.Placed)
+		executed = acct.Placed
 	}
-	if executed < acct.seen {
+	if executed < acct.Seen {
 		// The broker's terminal count contradicts its own fill stream downward. The stream's
 		// lots are real (they were credited and are part of the hedged book); keep them.
-		e.critical("taker %s terminal executed count %d is BELOW the %d lots its fill stream reported — keeping the stream's count (broker self-contradiction; reconcile will confirm)", orderID, executed, acct.seen)
-		executed = acct.seen
+		e.critical("taker %s terminal executed count %d is BELOW the %d lots its fill stream reported — keeping the stream's count (broker self-contradiction; reconcile will confirm)", orderID, executed, acct.Seen)
+		executed = acct.Seen
 	}
-	acct.final = executed
+	acct.Final = executed
 	delete(e.pending, orderID)
-	shortfall := acct.placed - executed
+	shortfall := acct.Placed - executed
 	if shortfall <= 0 {
 		e.recovery.ResetDeadStreak()
 		return // fully executed — the placement-time credit is confirmed
@@ -132,9 +130,9 @@ func (e *Engine) settleTaker(orderID string, acct *ordAcct, executed int) {
 	// Reverse the placement credit for the lots that never executed. They carry the
 	// credit-time price untouched (only stream-reported lots are ever amended), so the
 	// opposite-side fill at the same price cancels both inventory and cash exactly.
-	if uncredit := acct.credited - executed; uncredit > 0 && e.sink != nil {
-		e.sink.Fill(acct.sym, !acct.isBuy, uncredit, acct.price)
-		acct.credited = executed
+	if uncredit := acct.Credited - executed; uncredit > 0 && e.sink != nil {
+		e.sink.Fill(acct.Sym, !acct.IsBuy, uncredit, acct.Price)
+		acct.Credited = executed
 	}
 	streak := e.recovery.IncrementDeadStreak()
 	if streak >= takerDeadLimit {
@@ -143,12 +141,12 @@ func (e *Engine) settleTaker(orderID string, acct *ordAcct, executed int) {
 		// book naked until an operator arrived. Autonomous middle: the shortfall becomes a
 		// DEBT paid at the impaired backoff pace — the engine pulls its orders and keeps
 		// re-trying the hedge, however long the broker misbehaves.
-		e.critical("taker %s died with %d/%d lots executed on %s — %d consecutive takers confirmed dead short; slowing re-hedges to the impaired debt pace", orderID, executed, acct.placed, acct.sym, streak)
-		e.deferHedge(acct.sym, acct.isBuy, shortfall)
+		e.critical("taker %s died with %d/%d lots executed on %s — %d consecutive takers confirmed dead short; slowing re-hedges to the impaired debt pace", orderID, executed, acct.Placed, acct.Sym, streak)
+		e.deferHedge(acct.Sym, acct.IsBuy, shortfall)
 		return
 	}
-	e.critical("taker %s died with %d/%d lots executed on %s — credit reversed; re-hedging the %d-lot shortfall", orderID, executed, acct.placed, acct.sym, shortfall)
-	e.takerRetry(acct.sym, acct.isBuy, shortfall)
+	e.critical("taker %s died with %d/%d lots executed on %s — credit reversed; re-hedging the %d-lot shortfall", orderID, executed, acct.Placed, acct.Sym, shortfall)
+	e.takerRetry(acct.Sym, acct.IsBuy, shortfall)
 }
 
 // hedge crosses the spread on symbol for lots to complete a clip increment.
@@ -378,7 +376,7 @@ func (e *Engine) commitTakerPlacement(symbol string, buy bool, lots int, id stri
 		e.critical("broker REUSED order id %s for a taker %s (buy=%v x%d) — replacing its fill account; new clips wait for a clean reconcile", id, symbol, buy, lots)
 		e.recovery.MarkUnverified()
 	}
-	acct := &ordAcct{maker: false, sym: symbol, isBuy: buy, placed: lots, final: -1, placedAt: e.now} // taker: never re-hedged as stray
+	acct := &orderregistry.OrdAcct{Maker: false, Sym: symbol, IsBuy: buy, Placed: lots, Final: -1, PlacedAt: e.now} // taker: never re-hedged as stray
 	e.own[id] = acct
 	// The placement credit below is an assumption until the broker's data confirms it —
 	// track the order until its fill events (or a terminal status) do. A REUSED id is
@@ -394,9 +392,9 @@ func (e *Engine) commitTakerPlacement(symbol string, buy bool, lots int, id stri
 	// at the touch it crosses. The fill event trues the price later (see OnFill);
 	// if the taker dies unfilled, the confirmation watchdog catches and repairs it.
 	if e.sink != nil {
-		acct.price = e.quote.CrossPrice(symbol, buy)
-		e.sink.Fill(symbol, buy, lots, acct.price)
-		acct.credited = lots
+		acct.Price = e.quote.CrossPrice(symbol, buy)
+		e.sink.Fill(symbol, buy, lots, acct.Price)
+		acct.Credited = lots
 	}
 	return true
 }

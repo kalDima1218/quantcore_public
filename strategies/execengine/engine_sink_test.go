@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"QuantCore/strategies/execengine/orderregistry"
 )
 
 // The 2026-07-16 over-cap regression: a clip's fills sit undelivered on a stalled stream,
@@ -108,7 +110,7 @@ func TestRepeatedExcessCreditMirrorsHedge(t *testing.T) {
 	seedBooks(e, openHour)
 
 	id, _ := m.PlaceBid(testLegA, 4, 100)
-	e.own[id] = &ordAcct{maker: true, sym: testLegA, isBuy: true, price: 100, final: -1}
+	e.own[id] = &orderregistry.OrdAcct{Maker: true, Sym: testLegA, IsBuy: true, Price: 100, Final: -1}
 	m.executed = map[string]int{id: 2}
 	e.retireOrder(id) // terminal count 2, credited 2
 

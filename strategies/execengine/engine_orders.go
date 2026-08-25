@@ -4,6 +4,8 @@
 
 package execengine
 
+import "QuantCore/strategies/execengine/orderregistry"
+
 // OnOrderStatus reacts to a terminal order-state update. If a working clip's passive
 // order dies WITHOUT filling (rejected, cancelled or expired by the exchange), the clip
 // is broken, so it is pulled and the engine re-evaluates on the next bar rather than
@@ -22,8 +24,8 @@ func (e *Engine) OnOrderStatus(orderID string, dead bool) {
 	// An own TAKER reported terminal-dead is the broker saying an assumed-done hedge may not
 	// have happened. Don't guess which way — read the authoritative executed count and settle
 	// the account: fully filled → confirmed; short → un-credit and re-hedge the shortfall.
-	if acct := e.own[orderID]; acct != nil && !acct.maker {
-		if acct.final < 0 && acct.seen < acct.placed {
+	if acct := e.own[orderID]; acct != nil && !acct.Maker {
+		if acct.Final < 0 && acct.Seen < acct.Placed {
 			e.confirmDeadTaker(orderID, acct)
 		}
 		return
@@ -32,7 +34,7 @@ func (e *Engine) OnOrderStatus(orderID string, dead bool) {
 	// question the unary RPCs would not: the order is done. Try to settle the obligation NOW
 	// (one cancel/status round) instead of waiting out the retry backoff — cross-stream
 	// redundancy is exactly what makes an outage survivable. Failure keeps it queued.
-	if acct := e.own[orderID]; acct != nil && acct.maker && acct.deferred && !e.recovery.Halted() {
+	if acct := e.own[orderID]; acct != nil && acct.Maker && acct.Deferred && !e.recovery.Halted() {
 		e.tryDeferredRetire(orderID)
 		return
 	}
@@ -42,7 +44,7 @@ func (e *Engine) OnOrderStatus(orderID string, dead bool) {
 	if orderID != e.clip.legA.id && orderID != e.clip.legB.id {
 		return
 	}
-	if acct := e.own[orderID]; acct != nil && acct.final >= 0 {
+	if acct := e.own[orderID]; acct != nil && acct.Final >= 0 {
 		return // our own retire's cancel-ack — the clip is intact
 	}
 	e.CancelClip()
@@ -69,10 +71,10 @@ func (e *Engine) retireOrder(orderID string) int {
 	if acct == nil {
 		return 0
 	}
-	if acct.deferred {
+	if acct.Deferred {
 		return 0 // already queued for confirmation — the obligation loop owns it now
 	}
-	if acct.final < 0 {
+	if acct.Final < 0 {
 		executed, err := e.maker.Cancel(orderID)
 		if err != nil {
 			executed, err = e.maker.Cancel(orderID) // one retry: transient rpc blips are common
@@ -95,11 +97,11 @@ func (e *Engine) retireOrder(orderID string) int {
 		}
 		e.finishRetire(orderID, acct, executed)
 	}
-	gap := acct.final - acct.folded
+	gap := acct.Final - acct.Folded
 	if gap <= 0 {
 		return 0
 	}
-	acct.folded = acct.final
+	acct.Folded = acct.Final
 	return gap
 }
 
@@ -107,22 +109,22 @@ func (e *Engine) retireOrder(orderID string) int {
 // account: the placed-size clamp, the downward-contradiction check, and the sink credit
 // for lots learned only from the ack. Shared by the synchronous retire and the deferred
 // obligation loop.
-func (e *Engine) finishRetire(orderID string, acct *ordAcct, executed int) {
+func (e *Engine) finishRetire(orderID string, acct *orderregistry.OrdAcct, executed int) {
 	// The same placed-size ceiling OnFill enforces: a terminal executed count beyond the
 	// order's placement size is a corrupt ack, and folding it would top up / hedge lots
 	// that cannot exist at the broker.
-	if acct.placed > 0 && executed > acct.placed {
-		e.critical("%s terminal executed count %d exceeds its placed size %d — clamping (corrupt ack?)", orderID, executed, acct.placed)
-		executed = acct.placed
+	if acct.Placed > 0 && executed > acct.Placed {
+		e.critical("%s terminal executed count %d exceeds its placed size %d — clamping (corrupt ack?)", orderID, executed, acct.Placed)
+		executed = acct.Placed
 	}
-	acct.final = executed
+	acct.Final = executed
 	// The broker's terminal count can also contradict its own fill stream DOWNWARD: fewer
 	// lots executed than the events the engine already acted on (and hedged). There is no
 	// safe auto-repair — un-hedging on the say-so of a self-contradicting broker could
 	// just as well strand a naked leg — so the book keeps the acted-on hedges and the
 	// contradiction is only surfaced loudly; reconcile confirms which side was right.
-	if acct.final < acct.folded {
-		e.critical("%s terminal executed count %d is BELOW the %d lots already acted on — the broker contradicts its own fill stream; the book may be over-hedged by %d (reconcile will confirm)", orderID, acct.final, acct.folded, acct.folded-acct.final)
+	if acct.Final < acct.Folded {
+		e.critical("%s terminal executed count %d is BELOW the %d lots already acted on — the broker contradicts its own fill stream; the book may be over-hedged by %d (reconcile will confirm)", orderID, acct.Final, acct.Folded, acct.Folded-acct.Final)
 	}
 	// Lots learned ONLY from the cancel-ack (no fill event yet): credit them to the sink
 	// NOW, at the order's resting limit (exact for a passive), so the position the Decider
@@ -130,8 +132,8 @@ func (e *Engine) finishRetire(orderID string, acct *ordAcct, executed int) {
 	// stream otherwise leaves the cap checking a stale position while clips keep opening —
 	// the 2026-07-16 over-cap incident. The late fill event then amends, never re-adds
 	// (see OnFill's credited guard).
-	if e.sink != nil && acct.final > acct.credited {
-		e.sink.Fill(acct.sym, acct.isBuy, acct.final-acct.credited, acct.price)
-		acct.credited = acct.final
+	if e.sink != nil && acct.Final > acct.Credited {
+		e.sink.Fill(acct.Sym, acct.IsBuy, acct.Final-acct.Credited, acct.Price)
+		acct.Credited = acct.Final
 	}
 }

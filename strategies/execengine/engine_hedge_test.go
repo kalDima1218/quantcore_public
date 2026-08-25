@@ -8,6 +8,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"QuantCore/strategies/execengine/orderregistry"
 )
 
 // --- first fill hedges the other leg: direction, counterpart races, and the no-taker case when both legs land passively ---
@@ -198,7 +200,7 @@ func TestFillBeyondTerminalCountHedgesExcessOnly(t *testing.T) {
 	seedBooks(e, openHour)
 
 	id, _ := m.PlaceBid(testLegA, 4, 100)
-	e.own[id] = &ordAcct{maker: true, final: -1}
+	e.own[id] = &orderregistry.OrdAcct{Maker: true, Final: -1}
 	m.executed = map[string]int{id: 2}
 	if gap := e.retireOrder(id); gap != 2 {
 		t.Fatalf("gap=%d want 2", gap)
@@ -258,7 +260,7 @@ func TestExcessWithinPlacedStillHedged(t *testing.T) {
 	seedBooks(e, openHour)
 
 	id, _ := m.PlaceBid(testLegA, 4, 100)
-	e.own[id] = &ordAcct{maker: true, sym: testLegA, isBuy: true, price: 100, placed: 4, final: -1}
+	e.own[id] = &orderregistry.OrdAcct{Maker: true, Sym: testLegA, IsBuy: true, Price: 100, Placed: 4, Final: -1}
 	m.executed = map[string]int{id: 2}
 	if gap := e.retireOrder(id); gap != 2 {
 		t.Fatalf("gap=%d want 2", gap)
@@ -285,7 +287,7 @@ func TestRedeliveredExcessHedgeBoundedByPlaced(t *testing.T) {
 	seedBooks(e, openHour)
 
 	id, _ := m.PlaceBid(testLegA, 4, 100)
-	e.own[id] = &ordAcct{maker: true, sym: testLegA, isBuy: true, price: 100, placed: 4, final: -1}
+	e.own[id] = &orderregistry.OrdAcct{Maker: true, Sym: testLegA, IsBuy: true, Price: 100, Placed: 4, Final: -1}
 	m.executed = map[string]int{id: 2}
 	e.retireOrder(id) // terminal count 2
 
@@ -368,7 +370,7 @@ func TestStrayFillGarbledSymbolStillHedgesViaAccount(t *testing.T) {
 	seedBooks(e, openHour)
 
 	id, _ := m.PlaceBid(testLegA, 2, 100)
-	e.own[id] = &ordAcct{maker: true, sym: testLegA, isBuy: true, price: 100, placed: 2, final: -1}
+	e.own[id] = &orderregistry.OrdAcct{Maker: true, Sym: testLegA, IsBuy: true, Price: 100, Placed: 2, Final: -1}
 
 	// No owning clip; the event's symbol/side are garbage relative to the config legs.
 	e.OnFill(openHour, id, testLegA+"@MISX", false, 2, 100)
@@ -389,7 +391,7 @@ func TestExcessHedgeGarbledSymbolStillHedgesViaAccount(t *testing.T) {
 	seedBooks(e, openHour)
 
 	id, _ := m.PlaceAsk(testLegB, 4, 51)
-	e.own[id] = &ordAcct{maker: true, sym: testLegB, isBuy: false, price: 51, placed: 4, final: -1}
+	e.own[id] = &orderregistry.OrdAcct{Maker: true, Sym: testLegB, IsBuy: false, Price: 51, Placed: 4, Final: -1}
 	m.executed = map[string]int{id: 1}
 	e.retireOrder(id) // terminal count 1
 
@@ -580,8 +582,8 @@ func TestDeadTakerConfirmedUnfilledIsUncreditedAndRehedged(t *testing.T) {
 	if sink.netB != -2 {
 		t.Fatalf("un-credit + fresh hedge must net to the hedged book: netB=%d want -2 (%v)", sink.netB, sink.events)
 	}
-	if acct := e.own[tak]; acct.final != 0 {
-		t.Fatalf("the dead taker's account must record the confirmed terminal count, final=%d", acct.final)
+	if acct := e.own[tak]; acct.Final != 0 {
+		t.Fatalf("the dead taker's account must record the confirmed terminal count, final=%d", acct.Final)
 	}
 }
 

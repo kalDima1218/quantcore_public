@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"QuantCore/modlog"
+	"QuantCore/strategies/execengine/orderregistry"
 	"QuantCore/strategies/execengine/quotebook"
 	"QuantCore/strategies/execengine/recoverymachine"
 )
@@ -197,10 +198,13 @@ type Engine struct {
 	// transitions (checkPendingTakers, placeTakerRPC's caller) stay on Engine.
 	pending pendingSet
 
-	// own maps every order id this engine has placed THIS process to its fill account —
-	// see ledger.go for what it owns and why its type is named but its transitions
-	// (OnFill, OnOrderStatus, retireOrder) stay on Engine.
-	own ledger
+	// own is the engine's real, compiler-enforced order registry: every order id this
+	// engine has placed THIS process, mapped to its fill account (package orderregistry).
+	// OrdAcct's own fields are exported plain data (see the package doc comment for why),
+	// but the TYPE itself only exists there — the transitions that read/write it (OnFill,
+	// OnOrderStatus, retireOrder) stay on Engine, since their call graphs reach into
+	// clip/hedge/recovery state within single events.
+	own orderregistry.Ledger
 }
 
 // NewEngine builds an execution engine for cfg driven by maker/taker order operations
@@ -208,7 +212,7 @@ type Engine struct {
 func NewEngine(cfg EngineConfig, maker Maker, taker Taker, dm Decider) *Engine {
 	e := &Engine{
 		cfg: cfg, dm: dm, maker: maker, taker: taker, limiter: noLimit{}, clock: realClock{},
-		own:      ledger{},
+		own:      orderregistry.Ledger{},
 		pending:  pendingSet{},
 		quote:    quotebook.New(cfg.LegA, cfg.LegB),
 		recovery: recoverymachine.New(cfg.LogTag),
@@ -339,8 +343,8 @@ func (e *Engine) OnFill(ts time.Time, orderID, symbol string, buy bool, lots int
 	// can arrive in a different format than the config legs (the runners warn about exactly
 	// that), and trusting it would make hedgeStrayMakerFill recognize neither leg and
 	// silently skip a stray/excess hedge: a naked leg.
-	if acct.sym != "" {
-		symbol, buy = acct.sym, acct.isBuy
+	if acct.Sym != "" {
+		symbol, buy = acct.Sym, acct.IsBuy
 	}
 	// An order can never execute more lots than it was placed for: reported lots beyond the
 	// placed size are a re-delivered event that slipped the runner's trade-id dedup (or a
@@ -348,16 +352,16 @@ func (e *Engine) OnFill(ts time.Time, orderID, symbol string, buy bool, lots int
 	// retired one the impossible lots would overflow past the terminal count into the
 	// excess-hedge path — either way the engine would double-hedge and double-count the
 	// position — so the impossible excess is dropped, loudly.
-	if over := acct.seen + lots - acct.placed; over > 0 && acct.placed > 0 {
-		e.critical("%s reported %d lots beyond its placed size %d on %s — dropping the impossible excess (re-delivered fill?)", orderID, over, acct.placed, symbol)
+	if over := acct.Seen + lots - acct.Placed; over > 0 && acct.Placed > 0 {
+		e.critical("%s reported %d lots beyond its placed size %d on %s — dropping the impossible excess (re-delivered fill?)", orderID, over, acct.Placed, symbol)
 		lots -= over
 		if lots <= 0 {
 			return
 		}
 	}
-	reported := acct.seen
-	acct.seen += lots
-	if !acct.maker {
+	reported := acct.Seen
+	acct.Seen += lots
+	if !acct.Maker {
 		// An own taker fill: a taker IS a hedge, so there is nothing to pair. Its lots were
 		// credited to the sink at placement (see takerRetry); the event only trues the
 		// crossed-touch estimate up to the actual fill price on the overlap. Lots beyond the
@@ -365,33 +369,33 @@ func (e *Engine) OnFill(ts time.Time, orderID, symbol string, buy bool, lots int
 		// for, so they can only be a re-delivered event (the runner's trade-id dedup is the
 		// primary guard; this is the backstop that keeps a duplicate from minting inventory).
 		if e.sink != nil {
-			if pre := acct.credited - reported; pre > 0 && price != acct.price {
-				e.sink.Amend(acct.sym, acct.isBuy, min(pre, lots), acct.price, price)
+			if pre := acct.Credited - reported; pre > 0 && price != acct.Price {
+				e.sink.Amend(acct.Sym, acct.IsBuy, min(pre, lots), acct.Price, price)
 			}
 		}
 		// Fills past a CONFIRMED-DEAD taker's terminal count: the broker contradicting its
 		// own terminal ack. These lots are real executions the settle already un-credited
 		// (and re-hedged as a shortfall), so the book is now over-hedged by them — re-credit
 		// the truth and say so loudly; reconcile confirms which legs are actually unbalanced.
-		if acct.final >= 0 {
-			if beyond := acct.seen - max(acct.final, reported); beyond > 0 {
-				e.critical("taker %s filled %d lots BEYOND its confirmed terminal count %d on %s — the broker contradicts its own terminal ack; the book may be over-hedged (reconcile will confirm)", orderID, beyond, acct.final, symbol)
+		if acct.Final >= 0 {
+			if beyond := acct.Seen - max(acct.Final, reported); beyond > 0 {
+				e.critical("taker %s filled %d lots BEYOND its confirmed terminal count %d on %s — the broker contradicts its own terminal ack; the book may be over-hedged (reconcile will confirm)", orderID, beyond, acct.Final, symbol)
 				if e.sink != nil {
-					e.sink.Fill(acct.sym, acct.isBuy, beyond, price)
-					acct.credited += beyond
+					e.sink.Fill(acct.Sym, acct.IsBuy, beyond, price)
+					acct.Credited += beyond
 				}
 			}
 		}
 		return
 	}
-	if acct.final >= 0 {
+	if acct.Final >= 0 {
 		// Lots in this event beyond BOTH the terminal count and everything already reported.
 		// The cumulative view (no seen-rollback — the old rollback re-hedged the SAME
 		// beyond-terminal lots on every re-delivery, unboundedly) caps the total ever hedged
 		// beyond the ack at placed − final: a genuine beyond-terminal fill — the broker
 		// contradicting its own cancel-ack — is hedged below, while endless re-deliveries are
 		// cut off at the placed-size ceiling above.
-		excess := acct.seen - max(acct.final, reported)
+		excess := acct.Seen - max(acct.Final, reported)
 		if excess < 0 {
 			excess = 0
 		}
@@ -400,12 +404,12 @@ func (e *Engine) OnFill(ts time.Time, orderID, symbol string, buy bool, lots int
 		// trues the limit-price estimate — a no-op for a passive, which fills at its limit —
 		// while excess lots (hedged below) are new real inventory and credit as a fresh fill.
 		if e.sink != nil {
-			if dup := lots - excess; dup > 0 && price != acct.price {
-				e.sink.Amend(acct.sym, acct.isBuy, dup, acct.price, price)
+			if dup := lots - excess; dup > 0 && price != acct.Price {
+				e.sink.Amend(acct.Sym, acct.IsBuy, dup, acct.Price, price)
 			}
 			if excess > 0 {
-				e.sink.Fill(acct.sym, acct.isBuy, excess, price)
-				acct.credited += excess
+				e.sink.Fill(acct.Sym, acct.IsBuy, excess, price)
+				acct.Credited += excess
 			}
 		}
 		if excess > 0 {
@@ -418,10 +422,10 @@ func (e *Engine) OnFill(ts time.Time, orderID, symbol string, buy bool, lots int
 	// can have been credited ahead of the stream for it (retire and taker placement are the
 	// only ahead-of-stream credits, and neither applies here).
 	if e.sink != nil {
-		e.sink.Fill(acct.sym, acct.isBuy, lots, price)
-		acct.credited += lots
+		e.sink.Fill(acct.Sym, acct.IsBuy, lots, price)
+		acct.Credited += lots
 	}
-	acct.folded += lots
+	acct.Folded += lots
 
 	c := e.clip
 	if c == nil || (orderID != c.legA.id && orderID != c.legB.id) {

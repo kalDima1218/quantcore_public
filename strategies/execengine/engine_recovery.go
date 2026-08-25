@@ -6,15 +6,17 @@
 
 package execengine
 
+import "QuantCore/strategies/execengine/orderregistry"
+
 // deferRetire queues an order whose retirement the broker would not confirm (cancel
 // failed and no terminal status). The obligation loop keeps asking; until it is answered
 // the order counts zero executed lots — WAITING, never guessing — and any lots the
 // eventual answer reveals are pair-hedged then.
-func (e *Engine) deferRetire(orderID string, acct *ordAcct) {
-	if acct.deferred {
+func (e *Engine) deferRetire(orderID string, acct *orderregistry.OrdAcct) {
+	if acct.Deferred {
 		return
 	}
-	acct.deferred = true
+	acct.Deferred = true
 	e.recovery.QueueRetire(orderID, e.now, e.placeBackoff())
 }
 
@@ -86,7 +88,7 @@ func (e *Engine) tryDeferredRetire(orderID string) bool {
 	if acct == nil {
 		return true // untracked — nothing to confirm
 	}
-	if acct.final < 0 {
+	if acct.Final < 0 {
 		executed, err := e.maker.Cancel(orderID)
 		if err != nil {
 			var terminal bool
@@ -97,11 +99,11 @@ func (e *Engine) tryDeferredRetire(orderID string) bool {
 		}
 		e.finishRetire(orderID, acct, executed)
 	}
-	acct.deferred = false
-	if gap := acct.final - acct.folded; gap > 0 {
-		acct.folded = acct.final
+	acct.Deferred = false
+	if gap := acct.Final - acct.Folded; gap > 0 {
+		acct.Folded = acct.Final
 		e.logf("deferred retire %s resolved: %d executed lots surfaced — pair-hedging them", orderID, gap)
-		e.hedgeStrayMakerFill(orderID, acct.sym, acct.isBuy, gap)
+		e.hedgeStrayMakerFill(orderID, acct.Sym, acct.IsBuy, gap)
 	} else {
 		e.logf("deferred retire %s resolved: terminal, nothing unaccounted", orderID)
 	}

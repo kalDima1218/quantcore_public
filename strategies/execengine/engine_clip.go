@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"sync"
 	"time"
+
+	"QuantCore/strategies/execengine/orderregistry"
 )
 
 // OnState folds one prepared signal bar into the engine. When idle and the Decider wants
@@ -576,6 +578,6 @@ func (e *Engine) placeLeg(lo *legOrder, sym string, lots int) error {
 	lo.placedAt = e.now // engine clock (the caller's event time) — starts the MinRest guarantee
 	// maker: ledger-own for the runner; fills fold through its account (see OnFill). The
 	// leg/side/limit are recorded so a cancel-ack gap can be credited without a fill event.
-	e.own[id] = &ordAcct{maker: true, sym: sym, isBuy: lo.isBid, price: lo.price, placed: lots, final: -1}
+	e.own[id] = &orderregistry.OrdAcct{Maker: true, Sym: sym, IsBuy: lo.isBid, Price: lo.price, Placed: lots, Final: -1}
 	return nil
 }
