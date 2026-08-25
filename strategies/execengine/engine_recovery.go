@@ -1,29 +1,10 @@
 // Degraded operation: impaired mode (the broker stopped answering — park obligations and
 // retry at a backing-off pace), halt, and reconciliation against the broker's real
-// position. Owns impaired/halted/suspect and drains the deferred retire/hedge queues.
+// position. State lives in recoverymachine.Machine (a real component); this file is the
+// obligation-retry LOOP and the multi-group orchestration around it, which needs the
+// ledger/broker/clip machinery recoverymachine deliberately knows nothing about.
 
 package execengine
-
-import (
-	"fmt"
-)
-
-// enterImpaired switches the engine into connection-trouble mode: no new clips, all
-// resting orders pulled (at the next handler entry — never mid-teardown, so a failure
-// inside settleClip cannot recursively re-settle the same clip), and every outstanding
-// obligation retried at a backing-off pace until the broker answers. It NEVER halts:
-// impaired is the state for unanswered questions, and unanswered questions are waited
-// out, not given up on. Idempotent; a halted engine stays halted (the kill-switch is the
-// operator's, and it wins).
-func (e *Engine) enterImpaired(reason string) {
-	if e.recovery.halted || e.recovery.impaired {
-		return
-	}
-	e.recovery.impaired = true
-	e.recovery.retryGap = e.placeBackoff()
-	e.recovery.nextRetryAt = e.now.Add(e.recovery.retryGap)
-	e.warn("%s — pulling all orders, suspending new clips; retrying outstanding obligations until the broker answers", reason)
-}
 
 // deferRetire queues an order whose retirement the broker would not confirm (cancel
 // failed and no terminal status). The obligation loop keeps asking; until it is answered
@@ -34,16 +15,14 @@ func (e *Engine) deferRetire(orderID string, acct *ordAcct) {
 		return
 	}
 	acct.deferred = true
-	e.recovery.retireQ = append(e.recovery.retireQ, orderID)
-	e.enterImpaired(fmt.Sprintf("order %s: cancel failed and no terminal status yet", orderID))
+	e.recovery.QueueRetire(orderID, e.now, e.placeBackoff())
 }
 
 // deferHedge queues a taker hedge that could not be placed. The book OWES these lots; the
 // obligation loop keeps trying until the broker accepts them. The debt is NOT credited to
 // the sink until actually placed — credits belong to real orders only.
 func (e *Engine) deferHedge(symbol string, buy bool, lots int) {
-	e.recovery.debts = append(e.recovery.debts, hedgeDebt{sym: symbol, buy: buy, lots: lots})
-	e.enterImpaired(fmt.Sprintf("hedge %s (buy=%v x%d) could not be placed", symbol, buy, lots))
+	e.recovery.DeferHedge(symbol, buy, lots, e.now, e.placeBackoff())
 }
 
 // serviceImpaired runs the impaired-mode housekeeping at a handler entry (a safe point:
@@ -52,7 +31,7 @@ func (e *Engine) deferHedge(symbol string, buy bool, lots int) {
 // confirmed by the broker the engine recovers on its own — through the unverified gate,
 // so one clean reconcile pass re-confirms the position before any new clip opens.
 func (e *Engine) serviceImpaired() {
-	if !e.recovery.impaired || e.recovery.halted {
+	if !e.recovery.Impaired() || e.recovery.Halted() {
 		return
 	}
 	if e.clip != nil {
@@ -61,48 +40,40 @@ func (e *Engine) serviceImpaired() {
 		// own config. Failures inside land in the queues below.
 		e.resolveClip(e.now)
 	}
-	if e.now.Before(e.recovery.nextRetryAt) {
+	if e.now.Before(e.recovery.NextRetryAt()) {
 		return
 	}
 	progressed := false
 
-	if len(e.recovery.retireQ) > 0 {
-		remaining := e.recovery.retireQ[:0]
-		for _, id := range e.recovery.retireQ {
+	if q := e.recovery.RetireQueue(); len(q) > 0 {
+		remaining := q[:0]
+		for _, id := range q {
 			if e.tryDeferredRetire(id) {
 				progressed = true
 			} else {
 				remaining = append(remaining, id)
 			}
 		}
-		e.recovery.retireQ = remaining
+		e.recovery.SetRetireQueue(remaining)
 	}
-	if len(e.recovery.debts) > 0 {
-		remaining := e.recovery.debts[:0]
-		for _, d := range e.recovery.debts {
-			if e.tryPlaceTaker(d.sym, d.buy, d.lots) {
+	if d := e.recovery.Debts(); len(d) > 0 {
+		remaining := d[:0]
+		for _, deb := range d {
+			if e.tryPlaceTaker(deb.Sym, deb.Buy, deb.Lots) {
 				progressed = true
 			} else {
-				remaining = append(remaining, d)
+				remaining = append(remaining, deb)
 			}
 		}
-		e.recovery.debts = remaining
+		e.recovery.SetDebts(remaining)
 	}
 
-	if len(e.recovery.retireQ) == 0 && len(e.recovery.debts) == 0 && e.clip == nil {
-		e.recovery.impaired = false
-		e.recovery.unverified = true // one clean reconcile pass must confirm the position before trading
-		e.recovery.retryGap = 0
-		e.logf("RECOVERED: every deferred cancel and hedge is confirmed — waiting for a clean reconcile before opening clips")
+	if len(e.recovery.RetireQueue()) == 0 && len(e.recovery.Debts()) == 0 && e.clip == nil {
+		e.recovery.ClearImpaired()
 		return
 	}
 	// Back off while the broker keeps not answering; any progress resets the pace.
-	if progressed {
-		e.recovery.retryGap = e.placeBackoff()
-	} else if e.recovery.retryGap *= 2; e.recovery.retryGap > impairedRetryMax {
-		e.recovery.retryGap = impairedRetryMax
-	}
-	e.recovery.nextRetryAt = e.now.Add(e.recovery.retryGap)
+	e.recovery.AdvancePace(e.now, progressed, e.placeBackoff(), impairedRetryMax)
 }
 
 // tryDeferredRetire re-asks the broker about one queued retirement: one cancel attempt,
@@ -139,12 +110,12 @@ func (e *Engine) tryDeferredRetire(orderID string) bool {
 
 // Impaired reports whether the engine is in connection-trouble mode: orders pulled, new
 // clips suspended, obligations retrying until the broker answers.
-func (e *Engine) Impaired() bool { return e.recovery.impaired }
+func (e *Engine) Impaired() bool { return e.recovery.Impaired() }
 
 // Suspect reports whether trading is suspended pending position confirmation: a reconcile
 // divergence (suspect) or an unconfirmable broker response (unverified). It clears by
 // itself on a clean reconcile pass.
-func (e *Engine) Suspect() bool { return e.recovery.suspect || e.recovery.unverified }
+func (e *Engine) Suspect() bool { return e.recovery.Suspect() }
 
 // StateLabel names the engine's current lifecycle state for the runners' status blocks:
 // "halted" (kill-switch), "impaired" (connection trouble: orders pulled, obligations
@@ -154,9 +125,9 @@ func (e *Engine) Suspect() bool { return e.recovery.suspect || e.recovery.unveri
 // substitutes its own strategy-level state (warmup, closed session, idle).
 func (e *Engine) StateLabel() string {
 	switch {
-	case e.recovery.halted:
+	case e.recovery.Halted():
 		return "halted"
-	case e.recovery.impaired:
+	case e.recovery.Impaired():
 		return "impaired"
 	case e.clip != nil:
 		return "working"
@@ -170,16 +141,14 @@ func (e *Engine) StateLabel() string {
 // from opening new clips. The current position is frozen (not auto-flattened) so an
 // operator can investigate and close it deliberately. Idempotent.
 func (e *Engine) Halt(reason string) {
-	if e.recovery.halted {
+	if !e.recovery.Halt(reason, e.Position()) {
 		return
 	}
-	e.recovery.halted = true
-	e.critical("%s (position=%d)", reason, e.Position())
 	e.CancelClip()
 }
 
 // Halted reports whether the kill-switch is tripped.
-func (e *Engine) Halted() bool { return e.recovery.halted }
+func (e *Engine) Halted() bool { return e.recovery.Halted() }
 
 // Reconcile compares the broker's actual per-leg positions (in contracts, signed) against
 // what the strategy believes it holds — the guard that catches missed fills and outside
@@ -199,7 +168,7 @@ func (e *Engine) Reconcile(legAActual, legBActual int) {
 	// mid-outage would only mis-blame the position. And a halted book is frozen for the
 	// operator, with nothing to resume. The runners already gate on working/halted; the
 	// engine refuses all three so no caller can misuse it.
-	if e.recovery.halted || e.clip != nil || e.recovery.impaired {
+	if e.recovery.Halted() || e.clip != nil || e.recovery.Impaired() {
 		return
 	}
 	// The broker reports each leg in its OWN contracts: a position of P LegA lots is −P on
@@ -208,24 +177,15 @@ func (e *Engine) Reconcile(legAActual, legBActual int) {
 	pos := e.Position()
 	wantB := -e.hedgeLots(e.cfg.LegB, pos)
 	if legAActual == pos && legBActual == wantB {
-		if e.recovery.suspect {
-			e.logf("reconcile: broker and internal positions agree again (pos=%d) — resuming", pos)
-			e.recovery.suspect = false
-			e.recovery.mismatchLogged = false
-		}
-		// A clean pass is the data confirmation the unverified state was waiting for: whatever
-		// untrackable order the broker's empty/reused id left behind, the account's actual
-		// positions now agree with the book.
-		if e.recovery.unverified {
-			e.logf("reconcile: broker and internal positions agree (pos=%d) — unverified broker responses confirmed harmless, resuming", pos)
-			e.recovery.unverified = false
-		}
+		// A clean pass resumes a healed reconcile divergence, and separately is the data
+		// confirmation the unverified state was waiting for: whatever untrackable order the
+		// broker's empty/reused id left behind, the account's actual positions now agree
+		// with the book. Each call is a no-op unless its own flag is set.
+		e.recovery.ResumeFromSuspect(pos)
+		e.recovery.ClearUnverified(pos)
 		return
 	}
-	if !e.recovery.suspect {
-		e.recovery.suspect = true
-		e.warn("reconcile: legA have=%d want=%d, legB have=%d want=%d — possibly an in-flight fill; new clips suspended until the next reconcile confirms",
-			legAActual, pos, legBActual, wantB)
+	if e.recovery.MarkSuspect(legAActual, pos, legBActual, wantB) {
 		return
 	}
 	// The divergence survived a second pass: it is real. The old engine tripped the
@@ -235,9 +195,5 @@ func (e *Engine) Reconcile(legAActual, legBActual int) {
 	// divergence heals (a delayed fill lands, an outside transfer is reversed, the broker
 	// view catches up), trading resumes by itself. No auto-trading repair is attempted:
 	// the position is doubted, and trading on a doubted position is guessing.
-	if !e.recovery.mismatchLogged {
-		e.recovery.mismatchLogged = true
-		e.critical("POSITION MISMATCH persisted across two reconciles: legA have=%d want=%d, legB have=%d want=%d — new clips suspended until broker and internal positions agree again (position frozen, not auto-repaired; investigate if this does not clear)",
-			legAActual, pos, legBActual, wantB)
-	}
+	e.recovery.LogPersistentMismatch(legAActual, pos, legBActual, wantB)
 }

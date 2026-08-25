@@ -1,11 +1,13 @@
-// Passive quoting: the engine's view of both books (the touches) and keeping a working
-// clip's resting orders on them. Owns legA/legB and backoffUntil. Nothing here decides
-// WHETHER to be in the market — only where a decided clip's passives must sit.
+// Passive quoting: keeping a working clip's resting orders on the current touch, which
+// lives in the quotebook package now (see quotebook.Book). Nothing here decides WHETHER to
+// be in the market — only where a decided clip's passives must sit.
 
 package execengine
 
 import (
 	"time"
+
+	"QuantCore/strategies/execengine/quotebook"
 )
 
 // OnBook folds a fresh best-bid/ask for one leg into the engine. It updates the leg's
@@ -14,22 +16,7 @@ import (
 // by every book tick.
 func (e *Engine) OnBook(symbol string, ts time.Time, bestBid, bestAsk float64) {
 	e.advanceNow(ts)
-	// An update strictly older than the stored touch is an out-of-order or replayed
-	// snapshot (stream reconnects re-deliver): folding it would REGRESS the touch to
-	// stale prices and re-peg/quote against a book that no longer exists. Newest data
-	// wins; equal timestamps still apply (intra-timestamp updates arrive in order).
-	switch symbol {
-	case e.cfg.LegA:
-		if e.quote.legA.ok && ts.Before(e.quote.legA.ts) {
-			return
-		}
-		e.quote.legA = touch{bid: bestBid, ask: bestAsk, ts: ts, ok: true}
-	case e.cfg.LegB:
-		if e.quote.legB.ok && ts.Before(e.quote.legB.ts) {
-			return
-		}
-		e.quote.legB = touch{bid: bestBid, ask: bestAsk, ts: ts, ok: true}
-	default:
+	if !e.quote.Update(symbol, ts, bestBid, bestAsk) {
 		return
 	}
 	e.serviceImpaired()
@@ -53,7 +40,7 @@ func (e *Engine) repegThrottle() time.Duration {
 // rate limiter, so re-pegging never starves the mandatory hedge/cancel budget.
 func (e *Engine) maybeRepeg(symbol string, ts time.Time) {
 	c := e.clip
-	if e.recovery.halted || c == nil || c.makerID != "" || e.cfg.DisableRepeg {
+	if e.recovery.Halted() || c == nil || c.makerID != "" || e.cfg.DisableRepeg {
 		return
 	}
 	// Which legs actually rest is a property of THIS clip (an Intent may override the
@@ -63,12 +50,12 @@ func (e *Engine) maybeRepeg(symbol string, ts time.Time) {
 		if c.mode == ExecSoloMakerLegB {
 			return // LegA is never rested when the perp is the sole passive
 		}
-		e.repegLeg(&c.legA, e.cfg.LegA, e.quote.legA, ts)
+		e.repegLeg(&c.legA, e.cfg.LegA, e.quote.TouchA(), ts)
 	case e.cfg.LegB:
 		if c.mode == ExecSoloMaker {
 			return // LegB is never rested in single-passive mode — nothing to re-peg
 		}
-		e.repegLeg(&c.legB, e.cfg.LegB, e.quote.legB, ts)
+		e.repegLeg(&c.legB, e.cfg.LegB, e.quote.TouchB(), ts)
 	}
 }
 
@@ -76,15 +63,15 @@ func (e *Engine) maybeRepeg(symbol string, ts time.Time) {
 // behind once a higher bid appears, a resting ask once a lower ask appears. On the (rare)
 // re-place failure the whole clip is abandoned — the old order is already cancelled, so
 // the pair can no longer be maintained — leaving the engine flat and idle after a backoff.
-func (e *Engine) repegLeg(lo *legOrder, sym string, t touch, ts time.Time) {
-	if !t.valid() {
+func (e *Engine) repegLeg(lo *legOrder, sym string, t quotebook.Touch, ts time.Time) {
+	if !t.Valid() {
 		return
 	}
-	target := t.ask
-	behind := t.ask < lo.price // resting ask out-quoted by a lower ask
+	target := t.Ask
+	behind := t.Ask < lo.price // resting ask out-quoted by a lower ask
 	if lo.isBid {
-		target = t.bid
-		behind = t.bid > lo.price // resting bid out-quoted by a higher bid
+		target = t.Bid
+		behind = t.Bid > lo.price // resting bid out-quoted by a higher bid
 	}
 	if !behind {
 		return
@@ -119,12 +106,12 @@ func (e *Engine) repegLeg(lo *legOrder, sym string, t touch, ts time.Time) {
 			realA, realB = 0, gap
 		}
 		e.settleClip(realA, realB, true)
-		if !e.recovery.halted {
+		if !e.recovery.Halted() {
 			e.commitClip(ts)
 		}
 		return
 	}
-	if e.recovery.halted || e.recovery.impaired || e.clip == nil {
+	if e.recovery.Halted() || e.recovery.Impaired() || e.clip == nil {
 		// The retire could not complete (halt, or a deferred cancel put the engine into
 		// impaired mode): the old order may still rest, so nothing may be re-placed on top
 		// of it. Impaired teardown pulls the clip at the next handler entry.
@@ -134,7 +121,7 @@ func (e *Engine) repegLeg(lo *legOrder, sym string, t touch, ts time.Time) {
 	if err := e.placeLeg(lo, sym, e.clip.target); err != nil {
 		e.logf("re-peg place %s failed: %v — abandoning clip", sym, err)
 		e.CancelClip() // settles the other leg; the re-pegged leg is already retired
-		e.quote.backoffUntil = ts.Add(e.placeBackoff())
+		e.quote.SetBackoff(ts.Add(e.placeBackoff()))
 		return
 	}
 	lo.lastRepeg = ts
@@ -147,25 +134,13 @@ func (e *Engine) repegLeg(lo *legOrder, sym string, t touch, ts time.Time) {
 // trading resumes by itself with the data. Gated on PullOnStaleBook (live runners only:
 // a backtest feed's quiet gaps are not outages) and on MaxStaleness > 0.
 func (e *Engine) checkStaleBooks(now time.Time) {
-	if !e.cfg.PullOnStaleBook || e.cfg.MaxStaleness <= 0 || e.clip == nil || e.recovery.halted {
+	if !e.cfg.PullOnStaleBook || e.cfg.MaxStaleness <= 0 || e.clip == nil || e.recovery.Halted() {
 		return
 	}
-	staleA := !e.quote.legA.ok || now.Sub(e.quote.legA.ts) > e.cfg.MaxStaleness
-	staleB := !e.quote.legB.ok || now.Sub(e.quote.legB.ts) > e.cfg.MaxStaleness
+	staleA, staleB := e.quote.Stale(now, e.cfg.MaxStaleness)
 	if !staleA && !staleB {
 		return
 	}
 	e.logf("book stale (legA=%v legB=%v beyond %s) — pulling resting orders until market data resumes", staleA, staleB, e.cfg.MaxStaleness)
 	e.resolveClip(now)
-}
-
-// crossPrice is the touch a taker on symbol crosses at (buy → the ask, sell → the bid) —
-// the credit-time price estimate for a placed taker's sink credit. 0 when the leg has no
-// touch yet; the fill event's amend replaces the estimate either way.
-func (e *Engine) crossPrice(symbol string, buy bool) float64 {
-	t := e.quote.legA
-	if symbol == e.cfg.LegB {
-		t = e.quote.legB
-	}
-	return t.sidePrice(!buy) // a buy crosses the resting ask, a sell the resting bid
 }

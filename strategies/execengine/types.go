@@ -160,25 +160,6 @@ type Persister interface {
 	SaveLots()
 }
 
-// touch is the last-known best bid/ask for one leg, with the time it was observed.
-type touch struct {
-	bid, ask float64
-	ts       time.Time
-	ok       bool
-}
-
-// valid reports whether the touch is a sane, non-crossed, positive-priced quote.
-func (t touch) valid() bool { return t.ok && t.bid > 0 && t.ask > 0 && t.ask >= t.bid }
-
-// sidePrice returns the price an order on the given side rests at: the bid for a
-// resting bid, the ask for a resting ask.
-func (t touch) sidePrice(isBid bool) float64 {
-	if isBid {
-		return t.bid
-	}
-	return t.ask
-}
-
 // legOrder is one leg's resting passive order: its id, the price it rests at and which
 // side it is (a bid we buy on / an ask we sell on), plus when it was last re-pegged (so a
 // fast-moving leg's re-pegs can be throttled) and when its CURRENT order was placed (each

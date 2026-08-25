@@ -11,9 +11,12 @@
 package execengine
 
 import (
+	"fmt"
 	"time"
 
 	"QuantCore/modlog"
+	"QuantCore/strategies/execengine/quotebook"
+	"QuantCore/strategies/execengine/recoverymachine"
 )
 
 // mlog is the execengine module's log: everything below still reaches stderr, and is
@@ -169,16 +172,20 @@ type Engine struct {
 	clock   Clock    // processing-time source for quota bookkeeping (Allow/Spend) — see clock.go
 	sink    FillSink // optional (live only): fed the engine's acted-on executions as they happen — see FillSink; credited in OnFill/finishRetire/tryPlaceTaker
 
-	// quote groups the latest per-leg book touch and the open-new-clip backoff — see
-	// quote.go for why these fields are grouped but their transitions stay on Engine.
-	quote quote
+	// quote is the engine's real, compiler-enforced component: the latest per-leg book
+	// touch and the open-new-clip backoff. Mutation only ever happens through its own
+	// exported methods (package quotebook) — re-peg decisions still need a working clip's
+	// OWN state too, so that logic stays on Engine and reads touches back out.
+	quote *quotebook.Book
 
 	clip *clip // the in-flight clip (nil when idle), at most one at a time
 
-	// recovery groups the kill-switch, connection-trouble mode, reconcile-divergence
-	// tracking and the deferred-obligation queues — see recovery.go for why these fields
-	// are grouped but their transition methods stay on Engine.
-	recovery recovery
+	// recovery is the engine's real, compiler-enforced component: the kill-switch,
+	// connection-trouble mode, reconcile-divergence tracking and the deferred-obligation
+	// queues. Mutation only ever happens through its own methods (package recoverymachine)
+	// — the obligation RETRY LOOP itself stays on Engine, since it needs the ledger/broker/
+	// clip machinery this package deliberately knows nothing about.
+	recovery *recoverymachine.Machine
 
 	// now is the engine's data-driven clock: the latest event time any handler has seen
 	// (monotonic max — book timestamps can lag tick times). It exists so state that needs a
@@ -201,8 +208,10 @@ type Engine struct {
 func NewEngine(cfg EngineConfig, maker Maker, taker Taker, dm Decider) *Engine {
 	e := &Engine{
 		cfg: cfg, dm: dm, maker: maker, taker: taker, limiter: noLimit{}, clock: realClock{},
-		own:     ledger{},
-		pending: pendingSet{},
+		own:      ledger{},
+		pending:  pendingSet{},
+		quote:    quotebook.New(cfg.LegA, cfg.LegB),
+		recovery: recoverymachine.New(cfg.LogTag),
 	}
 	// A hedge ratio outside single-passive mode is a misconfiguration the engine must not
 	// trade through. It cannot convert a LegB fill back into whole LegA lots, and the only
@@ -212,17 +221,9 @@ func NewEngine(cfg EngineConfig, maker Maker, taker Taker, dm Decider) *Engine {
 	// why. (NewEngine returns no error by design — the strategy configs validate first; this
 	// is the backstop for a caller that builds an EngineConfig directly.)
 	if cfg.HedgeRatio > 1 && !cfg.SoloMakerLeg && !cfg.TakerOnly {
-		e.recovery.halted = true
-		e.logf("HALTED at construction: HedgeRatio=%d requires SoloMakerLeg or TakerOnly (LegB must never rest as a passive, or a LegB fill could not be converted to whole LegA lots) — refusing to trade rather than hedging 1:1, which would be a %d-fold under-hedge", cfg.HedgeRatio, cfg.HedgeRatio)
+		e.recovery.Halt(fmt.Sprintf("HALTED at construction: HedgeRatio=%d requires SoloMakerLeg or TakerOnly (LegB must never rest as a passive, or a LegB fill could not be converted to whole LegA lots) — refusing to trade rather than hedging 1:1, which would be a %d-fold under-hedge", cfg.HedgeRatio, cfg.HedgeRatio), 0)
 	}
 	return e
-}
-
-// hedgeDebt is one taker hedge the engine owes the book but has not managed to place.
-type hedgeDebt struct {
-	sym  string
-	buy  bool
-	lots int
 }
 
 // advanceNow moves the engine's data-driven clock forward to ts (never backward — book
@@ -475,7 +476,7 @@ func (e *Engine) OnFill(ts time.Time, orderID, symbol string, buy bool, lots int
 				return
 			}
 			e.settleClip(realA, realB, true)
-			if !e.recovery.halted {
+			if !e.recovery.Halted() {
 				e.commitClip(ts)
 			}
 			return
@@ -490,7 +491,7 @@ func (e *Engine) OnFill(ts time.Time, orderID, symbol string, buy bool, lots int
 	} else {
 		e.hedge(e.cfg.LegA, c.dir > 0, lots)
 	}
-	if e.recovery.halted {
+	if e.recovery.Halted() {
 		return // a taker failed → already halted and resting passives cancelled
 	}
 	if c.makerFilled >= c.target {
