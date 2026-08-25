@@ -32,7 +32,7 @@ func (e *Engine) OnOrderStatus(orderID string, dead bool) {
 	// question the unary RPCs would not: the order is done. Try to settle the obligation NOW
 	// (one cancel/status round) instead of waiting out the retry backoff — cross-stream
 	// redundancy is exactly what makes an outage survivable. Failure keeps it queued.
-	if acct := e.own[orderID]; acct != nil && acct.maker && acct.deferred && !e.halted {
+	if acct := e.own[orderID]; acct != nil && acct.maker && acct.deferred && !e.recovery.halted {
 		e.tryDeferredRetire(orderID)
 		return
 	}

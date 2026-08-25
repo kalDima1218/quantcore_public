@@ -16,12 +16,12 @@ import (
 // out, not given up on. Idempotent; a halted engine stays halted (the kill-switch is the
 // operator's, and it wins).
 func (e *Engine) enterImpaired(reason string) {
-	if e.halted || e.impaired {
+	if e.recovery.halted || e.recovery.impaired {
 		return
 	}
-	e.impaired = true
-	e.retryGap = e.placeBackoff()
-	e.nextRetryAt = e.now.Add(e.retryGap)
+	e.recovery.impaired = true
+	e.recovery.retryGap = e.placeBackoff()
+	e.recovery.nextRetryAt = e.now.Add(e.recovery.retryGap)
 	e.logf("IMPAIRED: %s — pulling all orders, suspending new clips; retrying outstanding obligations until the broker answers", reason)
 }
 
@@ -34,7 +34,7 @@ func (e *Engine) deferRetire(orderID string, acct *ordAcct) {
 		return
 	}
 	acct.deferred = true
-	e.retireQ = append(e.retireQ, orderID)
+	e.recovery.retireQ = append(e.recovery.retireQ, orderID)
 	e.enterImpaired(fmt.Sprintf("order %s: cancel failed and no terminal status yet", orderID))
 }
 
@@ -42,7 +42,7 @@ func (e *Engine) deferRetire(orderID string, acct *ordAcct) {
 // obligation loop keeps trying until the broker accepts them. The debt is NOT credited to
 // the sink until actually placed — credits belong to real orders only.
 func (e *Engine) deferHedge(symbol string, buy bool, lots int) {
-	e.debts = append(e.debts, hedgeDebt{sym: symbol, buy: buy, lots: lots})
+	e.recovery.debts = append(e.recovery.debts, hedgeDebt{sym: symbol, buy: buy, lots: lots})
 	e.enterImpaired(fmt.Sprintf("hedge %s (buy=%v x%d) could not be placed", symbol, buy, lots))
 }
 
@@ -52,7 +52,7 @@ func (e *Engine) deferHedge(symbol string, buy bool, lots int) {
 // confirmed by the broker the engine recovers on its own — through the unverified gate,
 // so one clean reconcile pass re-confirms the position before any new clip opens.
 func (e *Engine) serviceImpaired() {
-	if !e.impaired || e.halted {
+	if !e.recovery.impaired || e.recovery.halted {
 		return
 	}
 	if e.clip != nil {
@@ -61,48 +61,48 @@ func (e *Engine) serviceImpaired() {
 		// own config. Failures inside land in the queues below.
 		e.resolveClip(e.now)
 	}
-	if e.now.Before(e.nextRetryAt) {
+	if e.now.Before(e.recovery.nextRetryAt) {
 		return
 	}
 	progressed := false
 
-	if len(e.retireQ) > 0 {
-		remaining := e.retireQ[:0]
-		for _, id := range e.retireQ {
+	if len(e.recovery.retireQ) > 0 {
+		remaining := e.recovery.retireQ[:0]
+		for _, id := range e.recovery.retireQ {
 			if e.tryDeferredRetire(id) {
 				progressed = true
 			} else {
 				remaining = append(remaining, id)
 			}
 		}
-		e.retireQ = remaining
+		e.recovery.retireQ = remaining
 	}
-	if len(e.debts) > 0 {
-		remaining := e.debts[:0]
-		for _, d := range e.debts {
+	if len(e.recovery.debts) > 0 {
+		remaining := e.recovery.debts[:0]
+		for _, d := range e.recovery.debts {
 			if e.tryPlaceTaker(d.sym, d.buy, d.lots) {
 				progressed = true
 			} else {
 				remaining = append(remaining, d)
 			}
 		}
-		e.debts = remaining
+		e.recovery.debts = remaining
 	}
 
-	if len(e.retireQ) == 0 && len(e.debts) == 0 && e.clip == nil {
-		e.impaired = false
-		e.unverified = true // one clean reconcile pass must confirm the position before trading
-		e.retryGap = 0
+	if len(e.recovery.retireQ) == 0 && len(e.recovery.debts) == 0 && e.clip == nil {
+		e.recovery.impaired = false
+		e.recovery.unverified = true // one clean reconcile pass must confirm the position before trading
+		e.recovery.retryGap = 0
 		e.logf("RECOVERED: every deferred cancel and hedge is confirmed — waiting for a clean reconcile before opening clips")
 		return
 	}
 	// Back off while the broker keeps not answering; any progress resets the pace.
 	if progressed {
-		e.retryGap = e.placeBackoff()
-	} else if e.retryGap *= 2; e.retryGap > impairedRetryMax {
-		e.retryGap = impairedRetryMax
+		e.recovery.retryGap = e.placeBackoff()
+	} else if e.recovery.retryGap *= 2; e.recovery.retryGap > impairedRetryMax {
+		e.recovery.retryGap = impairedRetryMax
 	}
-	e.nextRetryAt = e.now.Add(e.retryGap)
+	e.recovery.nextRetryAt = e.now.Add(e.recovery.retryGap)
 }
 
 // tryDeferredRetire re-asks the broker about one queued retirement: one cancel attempt,
@@ -139,12 +139,12 @@ func (e *Engine) tryDeferredRetire(orderID string) bool {
 
 // Impaired reports whether the engine is in connection-trouble mode: orders pulled, new
 // clips suspended, obligations retrying until the broker answers.
-func (e *Engine) Impaired() bool { return e.impaired }
+func (e *Engine) Impaired() bool { return e.recovery.impaired }
 
 // Suspect reports whether trading is suspended pending position confirmation: a reconcile
 // divergence (suspect) or an unconfirmable broker response (unverified). It clears by
 // itself on a clean reconcile pass.
-func (e *Engine) Suspect() bool { return e.suspect || e.unverified }
+func (e *Engine) Suspect() bool { return e.recovery.suspect || e.recovery.unverified }
 
 // StateLabel names the engine's current lifecycle state for the runners' status blocks:
 // "halted" (kill-switch), "impaired" (connection trouble: orders pulled, obligations
@@ -154,9 +154,9 @@ func (e *Engine) Suspect() bool { return e.suspect || e.unverified }
 // substitutes its own strategy-level state (warmup, closed session, idle).
 func (e *Engine) StateLabel() string {
 	switch {
-	case e.halted:
+	case e.recovery.halted:
 		return "halted"
-	case e.impaired:
+	case e.recovery.impaired:
 		return "impaired"
 	case e.clip != nil:
 		return "working"
@@ -170,16 +170,16 @@ func (e *Engine) StateLabel() string {
 // from opening new clips. The current position is frozen (not auto-flattened) so an
 // operator can investigate and close it deliberately. Idempotent.
 func (e *Engine) Halt(reason string) {
-	if e.halted {
+	if e.recovery.halted {
 		return
 	}
-	e.halted = true
+	e.recovery.halted = true
 	e.logf("HALTED: %s (position=%d)", reason, e.Position())
 	e.CancelClip()
 }
 
 // Halted reports whether the kill-switch is tripped.
-func (e *Engine) Halted() bool { return e.halted }
+func (e *Engine) Halted() bool { return e.recovery.halted }
 
 // Reconcile compares the broker's actual per-leg positions (in contracts, signed) against
 // what the strategy believes it holds — the guard that catches missed fills and outside
@@ -199,7 +199,7 @@ func (e *Engine) Reconcile(legAActual, legBActual int) {
 	// mid-outage would only mis-blame the position. And a halted book is frozen for the
 	// operator, with nothing to resume. The runners already gate on working/halted; the
 	// engine refuses all three so no caller can misuse it.
-	if e.halted || e.clip != nil || e.impaired {
+	if e.recovery.halted || e.clip != nil || e.recovery.impaired {
 		return
 	}
 	// The broker reports each leg in its OWN contracts: a position of P LegA lots is −P on
@@ -208,22 +208,22 @@ func (e *Engine) Reconcile(legAActual, legBActual int) {
 	pos := e.Position()
 	wantB := -e.hedgeLots(e.cfg.LegB, pos)
 	if legAActual == pos && legBActual == wantB {
-		if e.suspect {
+		if e.recovery.suspect {
 			e.logf("reconcile: broker and internal positions agree again (pos=%d) — resuming", pos)
-			e.suspect = false
-			e.mismatchLogged = false
+			e.recovery.suspect = false
+			e.recovery.mismatchLogged = false
 		}
 		// A clean pass is the data confirmation the unverified state was waiting for: whatever
 		// untrackable order the broker's empty/reused id left behind, the account's actual
 		// positions now agree with the book.
-		if e.unverified {
+		if e.recovery.unverified {
 			e.logf("reconcile: broker and internal positions agree (pos=%d) — unverified broker responses confirmed harmless, resuming", pos)
-			e.unverified = false
+			e.recovery.unverified = false
 		}
 		return
 	}
-	if !e.suspect {
-		e.suspect = true
+	if !e.recovery.suspect {
+		e.recovery.suspect = true
 		e.logf("reconcile WARNING: legA have=%d want=%d, legB have=%d want=%d — possibly an in-flight fill; new clips suspended until the next reconcile confirms",
 			legAActual, pos, legBActual, wantB)
 		return
@@ -235,8 +235,8 @@ func (e *Engine) Reconcile(legAActual, legBActual int) {
 	// divergence heals (a delayed fill lands, an outside transfer is reversed, the broker
 	// view catches up), trading resumes by itself. No auto-trading repair is attempted:
 	// the position is doubted, and trading on a doubted position is guessing.
-	if !e.mismatchLogged {
-		e.mismatchLogged = true
+	if !e.recovery.mismatchLogged {
+		e.recovery.mismatchLogged = true
 		e.logf("CRITICAL: POSITION MISMATCH persisted across two reconciles: legA have=%d want=%d, legB have=%d want=%d — new clips suspended until broker and internal positions agree again (position frozen, not auto-repaired; investigate if this does not clear)",
 			legAActual, pos, legBActual, wantB)
 	}

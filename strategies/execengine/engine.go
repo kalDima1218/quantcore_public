@@ -171,11 +171,14 @@ type Engine struct {
 
 	backoffUntil time.Time // suppress opening new clips until this time (rate-limit / failure backoff)
 
-	legA    touch
-	legB    touch
-	clip    *clip // the in-flight clip (nil when idle), at most one at a time
-	halted  bool  // kill-switch: no new clips; resting passives pulled; position frozen
-	suspect bool  // one reconcile pass diverged: new clips suspended until a clean pass clears it or a second divergence halts (see Reconcile)
+	legA touch
+	legB touch
+	clip *clip // the in-flight clip (nil when idle), at most one at a time
+
+	// recovery groups the kill-switch, connection-trouble mode, reconcile-divergence
+	// tracking and the deferred-obligation queues — see recovery.go for why these fields
+	// are grouped but their transition methods stay on Engine.
+	recovery recovery
 
 	// now is the engine's data-driven clock: the latest event time any handler has seen
 	// (monotonic max — book timestamps can lag tick times). It exists so state that needs a
@@ -189,47 +192,6 @@ type Engine struct {
 	// past TakerConfirmTimeout the engine stops opening new clips on top of the unconfirmed
 	// hedge and polls the order's status until the broker answers (see checkPendingTakers).
 	pending map[string]struct{}
-
-	// unverified records a broker response the engine could not tie to trackable state — an
-	// empty or reused order id on a placement that may still rest at the broker. Until a clean
-	// reconcile pass confirms the broker and internal positions agree, no new clips are opened
-	// against the possibly-wrong position. Unlike suspect it carries no halt strike: a later
-	// reconcile divergence runs the normal two-pass rule.
-	unverified bool
-
-	// takerDeadStreak counts consecutive own takers confirmed dead short of their placed size
-	// (each one already un-credited and re-hedged). A streak means the broker keeps accepting
-	// and then killing our hedges — re-hedging at full speed would churn; after takerDeadLimit
-	// the shortfall goes to the hedge-debt queue instead, paid at the impaired backoff pace.
-	takerDeadStreak int
-
-	// impaired is the CONNECTION-TROUBLE mode — the autonomous alternative to a kill-switch
-	// for every failure that is an unanswered question rather than a confirmed contradiction
-	// (a cancel that can't be confirmed, a hedge that can't be placed). While impaired the
-	// engine pulls all resting orders, opens no new clips, and retries its outstanding
-	// obligations (retireQ + debts) forever at a backing-off pace; when every obligation is
-	// confirmed by the broker it recovers by itself, requiring one clean reconcile pass
-	// before trading again. The kill-switch (Halt) is reserved for callers — the engine
-	// itself never gives up on a recoverable state.
-	impaired bool
-
-	// retireQ holds order ids whose retirement could not be confirmed (cancel failed and no
-	// terminal status): each is retried every obligation cycle until the broker answers, and
-	// any executed lots the answer reveals are pair-hedged then (see tryDeferredRetire).
-	retireQ []string
-
-	// debts are taker hedges the engine OWES the book but could not place (all attempts
-	// failed): each is retried every obligation cycle until it lands. A debt is not credited
-	// to the sink until actually placed — the credit belongs to real orders only.
-	debts []hedgeDebt
-
-	nextRetryAt time.Time     // next obligation-retry time (impaired pacing)
-	retryGap    time.Duration // current obligation-retry gap: placeBackoff() doubling to impairedRetryMax while nothing resolves
-
-	// mismatchLogged: the persistent-reconcile-mismatch CRITICAL line has been emitted for
-	// the current divergence episode (one loud line, not one per pass); cleared when broker
-	// and internal positions agree again.
-	mismatchLogged bool
 
 	// own maps every order id this engine has placed THIS process to its fill account
 	// (see ordAcct): maker-ness, lots acted on, and the terminal executed count learned at
@@ -308,7 +270,7 @@ func NewEngine(cfg EngineConfig, maker Maker, taker Taker, dm Decider) *Engine {
 	// why. (NewEngine returns no error by design — the strategy configs validate first; this
 	// is the backstop for a caller that builds an EngineConfig directly.)
 	if cfg.HedgeRatio > 1 && !cfg.SoloMakerLeg && !cfg.TakerOnly {
-		e.halted = true
+		e.recovery.halted = true
 		e.logf("HALTED at construction: HedgeRatio=%d requires SoloMakerLeg or TakerOnly (LegB must never rest as a passive, or a LegB fill could not be converted to whole LegA lots) — refusing to trade rather than hedging 1:1, which would be a %d-fold under-hedge", cfg.HedgeRatio, cfg.HedgeRatio)
 	}
 	return e
@@ -556,7 +518,7 @@ func (e *Engine) OnFill(ts time.Time, orderID, symbol string, buy bool, lots int
 				return
 			}
 			e.settleClip(realA, realB, true)
-			if !e.halted {
+			if !e.recovery.halted {
 				e.commitClip(ts)
 			}
 			return
@@ -571,7 +533,7 @@ func (e *Engine) OnFill(ts time.Time, orderID, symbol string, buy bool, lots int
 	} else {
 		e.hedge(e.cfg.LegA, c.dir > 0, lots)
 	}
-	if e.halted {
+	if e.recovery.halted {
 		return // a taker failed → already halted and resting passives cancelled
 	}
 	if c.makerFilled >= c.target {

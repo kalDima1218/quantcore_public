@@ -53,7 +53,7 @@ func (e *Engine) repegThrottle() time.Duration {
 // rate limiter, so re-pegging never starves the mandatory hedge/cancel budget.
 func (e *Engine) maybeRepeg(symbol string, ts time.Time) {
 	c := e.clip
-	if e.halted || c == nil || c.makerID != "" || e.cfg.DisableRepeg {
+	if e.recovery.halted || c == nil || c.makerID != "" || e.cfg.DisableRepeg {
 		return
 	}
 	// Which legs actually rest is a property of THIS clip (an Intent may override the
@@ -119,12 +119,12 @@ func (e *Engine) repegLeg(lo *legOrder, sym string, t touch, ts time.Time) {
 			realA, realB = 0, gap
 		}
 		e.settleClip(realA, realB, true)
-		if !e.halted {
+		if !e.recovery.halted {
 			e.commitClip(ts)
 		}
 		return
 	}
-	if e.halted || e.impaired || e.clip == nil {
+	if e.recovery.halted || e.recovery.impaired || e.clip == nil {
 		// The retire could not complete (halt, or a deferred cancel put the engine into
 		// impaired mode): the old order may still rest, so nothing may be re-placed on top
 		// of it. Impaired teardown pulls the clip at the next handler entry.
@@ -147,7 +147,7 @@ func (e *Engine) repegLeg(lo *legOrder, sym string, t touch, ts time.Time) {
 // trading resumes by itself with the data. Gated on PullOnStaleBook (live runners only:
 // a backtest feed's quiet gaps are not outages) and on MaxStaleness > 0.
 func (e *Engine) checkStaleBooks(now time.Time) {
-	if !e.cfg.PullOnStaleBook || e.cfg.MaxStaleness <= 0 || e.clip == nil || e.halted {
+	if !e.cfg.PullOnStaleBook || e.cfg.MaxStaleness <= 0 || e.clip == nil || e.recovery.halted {
 		return
 	}
 	staleA := !e.legA.ok || now.Sub(e.legA.ts) > e.cfg.MaxStaleness

@@ -18,7 +18,7 @@ import (
 // re-peg in OnBook, not here.
 func (e *Engine) OnState(state RowState) {
 	e.advanceNow(state.Time)
-	if e.halted {
+	if e.recovery.halted {
 		return
 	}
 	e.serviceImpaired()
@@ -26,7 +26,7 @@ func (e *Engine) OnState(state RowState) {
 	// a confirmation may have arrived as a status, and a confirmed shortfall must be
 	// re-hedged before the position is trusted for a new clip.
 	e.checkPendingTakers(e.now)
-	if e.impaired {
+	if e.recovery.impaired {
 		return // connection trouble: orders pulled, obligations retrying — wait, don't trade
 	}
 	if e.clip != nil {
@@ -38,7 +38,7 @@ func (e *Engine) OnState(state RowState) {
 	// are opened against it (see Reconcile). unverified is the same doubt from the other
 	// direction: the engine itself issued an order it cannot track (empty/reused id), so the
 	// position is unconfirmed until a clean reconcile pass agrees with the broker.
-	if e.suspect || e.unverified {
+	if e.recovery.suspect || e.recovery.unverified {
 		return
 	}
 	// A placed taker past its confirm window has neither fill events nor a terminal status:
@@ -174,7 +174,7 @@ func (e *Engine) abandonClip(ts time.Time) {
 	}
 	gapA := e.retireOrder(c.legA.id)
 	gapB := e.retireOrder(c.legB.id)
-	if e.halted || e.clip == nil {
+	if e.recovery.halted || e.clip == nil {
 		return // a retire hit a stuck order and halted — Halt already tore the clip down
 	}
 	if gapA == 0 && gapB == 0 {
@@ -184,7 +184,7 @@ func (e *Engine) abandonClip(ts time.Time) {
 	// A cancel caught fills after all. Complete the pair to target (the retires above are
 	// idempotent, so settleClip only issues the completion takers) and book the lot.
 	e.settleClip(gapA, gapB, true)
-	if !e.halted {
+	if !e.recovery.halted {
 		e.commitClip(ts)
 	}
 }
@@ -209,7 +209,7 @@ func (e *Engine) commitClip(ts time.Time) {
 		// catches in flight are real inventory beyond the booked target — match them on
 		// the other leg to stay 1:1 (takerRetry queues the debt if the broker is down;
 		// while halted the kill-switch already logged).
-		if gap := e.retireOrder(c.makerID); gap > 0 && !e.halted {
+		if gap := e.retireOrder(c.makerID); gap > 0 && !e.recovery.halted {
 			if c.makerID == c.legA.id {
 				e.takerRetry(e.cfg.LegB, c.legB.isBid, e.hedgeLots(e.cfg.LegB, gap))
 			} else {
@@ -240,7 +240,7 @@ func (e *Engine) completeClip(ts time.Time) {
 		return
 	}
 	e.settleClip(c.makerFilled, c.makerFilled, true)
-	if e.halted {
+	if e.recovery.halted {
 		return
 	}
 	e.commitClip(ts)
@@ -282,7 +282,7 @@ func (e *Engine) settleClip(realA, realB int, complete bool) {
 	if realA == want && realB == want {
 		return
 	}
-	if e.halted {
+	if e.recovery.halted {
 		e.logf("CRITICAL: clip legs unbalanced at halt (legA=%d legB=%d want=%d) — NOT hedged (kill-switch); fix manually", realA, realB, want)
 		return
 	}
@@ -485,7 +485,7 @@ func (e *Engine) openClip(in Intent, lots int, ts time.Time) (opened, retryable 
 // size is still the Decider's entry decision, not a hedge to chase — that goes through
 // takerRetryPlain instead (see the switch below).
 func (e *Engine) openTakerOnlyClip(in Intent, dir int, lots int, ts time.Time) (opened, retryable bool) {
-	if e.halted {
+	if e.recovery.halted {
 		// tryPlaceTaker's other callers reach the kill-switch check through takerRetry;
 		// this path races placeTakerRPC directly for the first attempt, bypassing it — so
 		// the kill switch needs its own check here.
@@ -577,12 +577,12 @@ func (e *Engine) placeLeg(lo *legOrder, sym string, lots int) error {
 	// divergence.
 	if id == "" {
 		e.logf("CRITICAL: broker returned an EMPTY order id placing %s x%d — treating as failed; the order may rest untracked, so new clips wait for a clean reconcile", sym, lots)
-		e.unverified = true
+		e.recovery.unverified = true
 		return fmt.Errorf("broker returned an empty order id for %s", sym)
 	}
 	if e.own[id] != nil {
 		e.logf("CRITICAL: broker REUSED order id %s placing %s x%d — treating as failed to protect the existing order's fill account; the order may rest untracked, so new clips wait for a clean reconcile", id, sym, lots)
-		e.unverified = true
+		e.recovery.unverified = true
 		return fmt.Errorf("broker reused order id %s for %s", id, sym)
 	}
 	lo.id = id
