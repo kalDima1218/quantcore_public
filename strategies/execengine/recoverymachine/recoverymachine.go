@@ -60,7 +60,7 @@ type Machine struct {
 	mismatchLogged bool
 }
 
-// New builds a Machine. logTag (e.g. "[basis_ema]") is stamped on every log line, matching
+// New builds a Machine. logTag (e.g. "[strategy_a]") is stamped on every log line, matching
 // EngineConfig.LogTag — pass "" for untagged.
 func New(logTag string) *Machine {
 	return &Machine{logTag: logTag}

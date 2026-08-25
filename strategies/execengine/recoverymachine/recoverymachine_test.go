@@ -221,9 +221,9 @@ func TestClearUnverifiedIsANoOpWhenNotUnverified(t *testing.T) {
 
 func TestLogTagIsStampedOnLogLines(t *testing.T) {
 	buf := withCapturedLog(t)
-	m := New("[basis_ema]")
+	m := New("[strategy_a]")
 	m.Halt("kill switch", 0)
-	if !strings.Contains(buf.String(), "[execengine][basis_ema]") {
+	if !strings.Contains(buf.String(), "[execengine][strategy_a]") {
 		t.Fatalf("log output missing the strategy tag, got:\n%s", buf.String())
 	}
 }

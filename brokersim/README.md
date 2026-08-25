@@ -20,11 +20,12 @@ Go-интерфейсов, а слой ниже — `grpcclient` + `trade/finam`
 # 1. Поднять сим (дефолты: счёт SIM-1 / секрет sim-secret, символы создаются на лету)
 go run ./cmd/finamsim
 
-# 2. Направить бота на сим (plaintext, только loopback-отладка)
-QUANTCORE_FINAM_ADDR=127.0.0.1:50051 go run . -basis-ema
+# 2. Направить бота на сим (plaintext, только loopback-отладка) — флаг зависит
+#    от диспетчера конкретного бота, здесь для примера
+QUANTCORE_FINAM_ADDR=127.0.0.1:50051 go run . -your-strategy-flag
 ```
 
-В `config_basis_ema.json` при этом ставится `secret`/`account_id` из конфига
+В `config_strategy_a.json` при этом ставится `secret`/`account_id` из конфига
 сима. Пустой `QUANTCORE_FINAM_ADDR` (дефолт) — боевой `api.finam.ru:443` с TLS;
 переключение на сим громко логируется в `logs/finam.log`.
 

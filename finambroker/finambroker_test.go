@@ -291,13 +291,13 @@ func TestPlacerLogLinesCarryLogTag(t *testing.T) {
 		func(string) (*orders.OrderState, error) { return nil, status.Error(codes.Unavailable, "down") },
 		func(string) (string, bool, error) { return "", false, errors.New("orders list down too") },
 	)
-	p.logTag = "[basis_ema]"
+	p.logTag = "[strategy_a]"
 	if _, err := p.placeResolved(kindLimitBid, "SI", 2, 100); err == nil {
 		t.Fatal("setup: expected the unresolved-placement error path")
 	}
 
 	out := buf.String()
-	if !strings.Contains(out, "[execengine][basis_ema]") {
+	if !strings.Contains(out, "[execengine][strategy_a]") {
 		t.Fatalf("log output missing the strategy tag, got:\n%s", out)
 	}
 	if !strings.Contains(out, "CRITICAL") {

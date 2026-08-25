@@ -28,7 +28,7 @@ import (
 var mlog = modlog.For("execengine")
 
 // NewMaker builds a Maker backed by live Finam GOOD_TILL_CROSSING limit orders. logTag
-// (e.g. "[basis_ema]") is stamped on every log line this adapter emits, matching
+// (e.g. "[strategy_a]") is stamped on every log line this adapter emits, matching
 // execengine.EngineConfig.LogTag, so two strategies sharing execengine.log stay
 // distinguishable — pass "" for untagged. Placements are idempotent against the
 // lost-response race — see placer.

@@ -128,7 +128,7 @@ const (
 // NewClientRetry dials the broker like NewClient, but treats a failed dial as a
 // TRANSIENT condition rather than a terminal one: it keeps retrying with capped
 // exponential backoff until a dial succeeds or ctx is done. label names the caller in
-// the log ("basis_ema", "price logging", ...).
+// the log ("strategy_a", "price logging", ...).
 //
 // It exists because a dial is the one broker interaction with no retry anywhere behind
 // it. Everything after startup recovers on its own — gRPC reconnects the transport,

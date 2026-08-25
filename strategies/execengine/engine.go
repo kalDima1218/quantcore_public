@@ -81,7 +81,7 @@ type EngineConfig struct {
 	//                                 re-pegs spaced only by RepegThrottle, pulls immediate). Safety teardowns — halt,
 	//                                 impaired, stale-book pull, fill-timeout, shutdown — ignore it: they never wait on a
 	//                                 courtesy timer.
-	LogTag string // per-instance tag appended to "[execengine]" in every log line (e.g. "[basis_ema]"), so
+	LogTag string // per-instance tag appended to "[execengine]" in every log line (e.g. "[strategy_a]"), so
 	//                                 two strategies sharing a process stay distinguishable in execengine.log; "" → untagged
 	DisableRepeg bool //               never re-peg a resting clip's passive orders to a moved touch (post-and-wait). No
 	//                                 production strategy sets it anymore: spread always followed the touch, and basis
