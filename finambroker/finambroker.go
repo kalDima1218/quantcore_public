@@ -293,7 +293,8 @@ const (
 // implementation (or a test double) can be wired up here without this adapter needing to
 // know its concrete type.
 type QuotaUpdater interface {
-	Set(remaining int, resetAt time.Time)
+	Snapshot() int64
+	Set(remaining int, resetAt, now time.Time, token int64)
 }
 
 // RefreshQuota polls Finam's placeOrder usage quota and feeds it to lim until ctx ends,
@@ -302,15 +303,17 @@ type QuotaUpdater interface {
 // Run it on its own goroutine; both live runners share it.
 func RefreshQuota(ctx context.Context, client *finam.Client, lim QuotaUpdater) {
 	poll := func() {
+		token := lim.Snapshot() // captured BEFORE the RPC, so Set can re-subtract spends that race it
 		cctx, cancel := context.WithTimeout(ctx, quotaRPCTimeout)
 		defer cancel()
 		quotas, err := finam.GetUsageMetrics(cctx, client)
+		now := time.Now()
 		if err != nil {
 			return
 		}
 		for _, q := range quotas {
 			if q.GetName() == placeOrderQuota {
-				lim.Set(int(q.GetRemaining()), q.GetResetTime().AsTime())
+				lim.Set(int(q.GetRemaining()), q.GetResetTime().AsTime(), now, token)
 				return
 			}
 		}

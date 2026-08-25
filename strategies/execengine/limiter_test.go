@@ -17,7 +17,7 @@ func TestQuotaLimiterLegacyPermissiveUntilSet(t *testing.T) {
 	if s := q.String(); s != "n/a" {
 		t.Fatalf("String()=%q, want n/a до Set", s)
 	}
-	q.Set(23, now.Add(time.Minute)) // 23 >= 2+20 -> пускать
+	q.Set(23, now.Add(time.Minute), now, 0) // 23 >= 2+20 -> пускать
 	if ok, _ := q.Allow(now, 2); !ok {
 		t.Fatal("23 >= 2+20 -> должен пускать")
 	}
@@ -90,7 +90,7 @@ func TestQuotaLimiterSetOverridesBootstrap(t *testing.T) {
 	q := NewQuotaLimiterBudget(20, 200, time.Minute)
 	now := time.Now()
 	q.Allow(now, 2) // бутстрап -> 200
-	q.Set(25, now.Add(30*time.Second))
+	q.Set(25, now.Add(30*time.Second), now, 0)
 	if r, _ := q.Remaining(); r != 25 {
 		t.Fatalf("Set должен переопределить бутстрап: remaining=%d, want 25", r)
 	}
@@ -140,7 +140,7 @@ func TestLimiterDenialBacksOffUntilReset(t *testing.T) {
 func TestQuotaLimiterKeepsMarginInReserve(t *testing.T) {
 	q := NewQuotaLimiter(2)
 	reset := openHour.Add(time.Minute)
-	q.Set(4, reset)
+	q.Set(4, reset, openHour, 0)
 
 	if ok, _ := q.Allow(openHour, 2); !ok {
 		t.Fatal("4 remaining with margin 2 must allow a 2-op burst")
@@ -159,7 +159,7 @@ func TestQuotaLimiterKeepsMarginInReserve(t *testing.T) {
 // Spend — the actual placement RPC — decrements, and Remaining tracks the local view.
 func TestQuotaLimiterAllowChecksAndSpendDecrements(t *testing.T) {
 	q := NewQuotaLimiter(2)
-	q.Set(10, openHour.Add(time.Minute))
+	q.Set(10, openHour.Add(time.Minute), openHour, 0)
 
 	q.Allow(openHour, 2) // granted but never placed
 	if rem, known := q.Remaining(); !known || rem != 10 {
@@ -210,7 +210,7 @@ func TestQuotaLimiterConcurrentSetAndAllow(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 1000; i++ {
-			q.Set(200, openHour.Add(time.Duration(i)*time.Millisecond))
+			q.Set(200, openHour.Add(time.Duration(i)*time.Millisecond), openHour.Add(-time.Second), 0)
 		}
 	}()
 	go func() {
@@ -228,11 +228,11 @@ func TestQuotaLimiterConcurrentSetAndAllow(t *testing.T) {
 // accounting glitch) must deny discretionary opens — the reserve is for hedges/cancels.
 func TestQuotaLimiterLowAndNegativeBudgetsDeny(t *testing.T) {
 	q := NewQuotaLimiter(5)
-	q.Set(5, openHour.Add(time.Minute)) // exactly the margin left
+	q.Set(5, openHour.Add(time.Minute), openHour, 0) // exactly the margin left
 	if ok, _ := q.Allow(openHour, 1); ok {
 		t.Fatal("a budget equal to the margin must deny")
 	}
-	q.Set(-3, openHour.Add(time.Minute)) // corrupt/negative budget
+	q.Set(-3, openHour.Add(time.Minute), openHour, 0) // corrupt/negative budget
 	if ok, _ := q.Allow(openHour, 1); ok {
 		t.Fatal("a negative budget must deny")
 	}
@@ -308,26 +308,101 @@ func TestQuotaLimiterUngatedHedgeSpendAsFirstRPCOfNewWindow(t *testing.T) {
 // Spend must keep debiting the broker-reported remaining exactly as before.
 func TestQuotaLimiterLegacySpendUnaffectedByRollover(t *testing.T) {
 	q := NewQuotaLimiter(5)
-	q.Set(10, openHour.Add(time.Minute))
+	q.Set(10, openHour.Add(time.Minute), openHour, 0)
 	q.Spend(openHour.Add(time.Hour), 3) // far past any "window" — legacy has none
 	if rem, _ := q.Remaining(); rem != 7 {
 		t.Fatalf("remaining=%d, want 7 (legacy Spend must not gain a rollover side effect)", rem)
 	}
 }
 
-// CONTRACT (not a bug): an authoritative broker Set always wins over any Spend that
-// landed while the usage-metrics RPC was in flight — Set's remaining is a snapshot from
-// request time and knows nothing about spends since. This pins the accepted staleness
-// window (bounded by quotaRPCTimeout, and self-healed by the next 5s poll) so a future
-// change to the merge behaviour is a deliberate decision, not a silent regression.
-func TestQuotaLimiterSetOverwritesConcurrentSpend(t *testing.T) {
+// Set must NEVER erase a Spend that raced the metrics RPC: the broker's snapshot was taken
+// before the spend happened, so its "remaining" knows nothing about it. token (from
+// Snapshot, called before the RPC) tells Set how many ops totalSpent has grown by since —
+// those must be re-subtracted from the broker's answer, not silently forgotten.
+func TestQuotaLimiterSetPreservesSpendThatRacedTheMetricsRPC(t *testing.T) {
 	q := NewQuotaLimiterBudget(20, 200, time.Minute)
-	q.Set(50, openHour.Add(time.Minute)) // broker snapshot taken before the in-flight spend
+	q.Set(50, openHour.Add(time.Minute), openHour, q.Snapshot()) // broker snapshot: 50 remaining
 
+	token := q.Snapshot() // RefreshQuota snapshots before issuing the NEXT metrics RPC
 	q.Spend(openHour, 10) // lands while that RPC is still in flight: 50 -> 40
 
-	q.Set(50, openHour.Add(time.Minute)) // the in-flight RPC's response finally arrives
-	if rem, _ := q.Remaining(); rem != 50 {
-		t.Fatalf("remaining=%d, want 50 (Set is last-write-wins by design; the 10-op spend is absorbed once the next poll runs)", rem)
+	q.Set(50, openHour.Add(time.Minute), openHour, token) // the in-flight RPC's response finally arrives, unaware of the spend
+	if rem, _ := q.Remaining(); rem != 40 {
+		t.Fatalf("remaining=%d, want 40 (the raced Spend must survive the late Set)", rem)
+	}
+}
+
+// Within the SAME broker epoch (resetAt unchanged), Set must never raise the local view of
+// remaining above what local tracking already knows was spent — a broker snapshot that
+// understates usage it has not itself accounted for yet must not be trusted over local
+// counting; apply min(localRemaining, reportedRemaining-spentSinceToken).
+func TestQuotaLimiterSetClampsToLocalRemainingWithinSameEpoch(t *testing.T) {
+	q := NewQuotaLimiterBudget(20, 200, time.Minute)
+	resetAt := openHour.Add(time.Minute)
+	q.Set(50, resetAt, openHour, q.Snapshot()) // remaining=50
+
+	q.Spend(openHour, 30) // local: 50 -> 20 (real placements the broker doesn't know about yet)
+
+	// A stale/optimistic broker snapshot for the SAME epoch claims MORE remains than local
+	// tracking knows — must not raise our belief above it.
+	q.Set(45, resetAt, openHour, q.Snapshot())
+	if rem, _ := q.Remaining(); rem != 20 {
+		t.Fatalf("remaining=%d, want 20 (same-epoch Set must never exceed local tracking)", rem)
+	}
+}
+
+// A NEW epoch (the broker's resetAt has advanced) must NOT be clamped against the old
+// epoch's low remaining — a fresh window's full budget is real and must be adopted as-is.
+func TestQuotaLimiterSetAdoptsFreshBudgetOnNewEpochWithoutClamping(t *testing.T) {
+	q := NewQuotaLimiterBudget(20, 200, time.Minute)
+	resetAt1 := openHour.Add(time.Minute)
+	q.Set(5, resetAt1, openHour, q.Snapshot()) // old epoch nearly exhausted: remaining=5
+
+	resetAt2 := resetAt1.Add(time.Minute) // the broker's window rolled
+	token := q.Snapshot()
+	q.Set(200, resetAt2, resetAt1, token)
+	if rem, _ := q.Remaining(); rem != 200 {
+		t.Fatalf("remaining=%d, want 200 (a new epoch must not inherit the old epoch's low remaining)", rem)
+	}
+}
+
+// RefreshQuota's polling loop is strictly sequential (one goroutine, poll() blocks the next
+// tick), but Set must still defend against an out-of-order response arriving anyway: a
+// stale token (older than the last APPLIED one) must never override a newer poll's answer.
+func TestQuotaLimiterSetIgnoresStaleOutOfOrderResponse(t *testing.T) {
+	q := NewQuotaLimiterBudget(20, 200, time.Minute)
+	resetAt := openHour.Add(time.Minute)
+
+	tokenOld := q.Snapshot() // poll #1 starts, totalSpent=0
+	q.Spend(openHour, 5)     // in flight during poll #1: totalSpent=5
+	tokenNew := q.Snapshot() // poll #2 starts, totalSpent=5
+	q.Spend(openHour, 5)     // in flight during poll #2: totalSpent=10
+
+	// poll #2's answer (190 as of totalSpent=5) arrives first: 5 ops raced it (10-5), so 185.
+	q.Set(190, resetAt, openHour, tokenNew)
+	if rem, _ := q.Remaining(); rem != 185 {
+		t.Fatalf("remaining=%d, want 185 after poll #2 lands", rem)
+	}
+
+	q.Set(195, resetAt, openHour, tokenOld) // poll #1's response arrives LATE, out of order
+	if rem, _ := q.Remaining(); rem != 185 {
+		t.Fatalf("remaining=%d, want 185 (a late, out-of-order response must not override a newer one)", rem)
+	}
+}
+
+// A Set whose OWN resetAt has already passed by the time it arrives (a slow RPC straddling
+// a window boundary) carries a dead number — applying it would adopt an already-stale
+// window. Discard it and let refreshWindow's self-heal (Allow/Spend) pick up the real
+// current window instead.
+func TestQuotaLimiterSetIgnoresAlreadyStaleResetAt(t *testing.T) {
+	q := NewQuotaLimiterBudget(20, 200, time.Minute)
+	q.Allow(openHour, 1) // bootstrap window: remaining=200, resetAt=openHour+1m
+
+	staleResetAt := openHour.Add(30 * time.Second) // this RPC's own resetAt had ALREADY passed by arrival
+	arrival := openHour.Add(90 * time.Second)      // processing time when Set is applied
+	q.Set(150, staleResetAt, arrival, q.Snapshot())
+
+	if rem, _ := q.Remaining(); rem != 200 {
+		t.Fatalf("remaining=%d, want 200 (a Set whose own resetAt already passed must be ignored)", rem)
 	}
 }

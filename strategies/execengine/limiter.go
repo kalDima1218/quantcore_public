@@ -43,13 +43,15 @@ const (
 // It is concurrency-safe: Set runs on the refresher goroutine, Allow/Spend on the engine
 // goroutine.
 type QuotaLimiter struct {
-	mu          sync.Mutex
-	margin      int
-	windowLimit int           // >0 → fail-safe self-managed budget; 0 → legacy (permissive until Set)
-	window      time.Duration // self-reset period for the bootstrap budget
-	remaining   int
-	resetAt     time.Time
-	known       bool // a REAL broker Set has arrived (authoritative); false → bootstrap/legacy
+	mu           sync.Mutex
+	margin       int
+	windowLimit  int           // >0 → fail-safe self-managed budget; 0 → legacy (permissive until Set)
+	window       time.Duration // self-reset period for the bootstrap budget
+	remaining    int
+	resetAt      time.Time
+	known        bool  // a REAL broker Set has arrived (authoritative); false → bootstrap/legacy
+	totalSpent   int64 // monotonic count of every op ever booked via Spend; never reset
+	lastSetToken int64 // token of the last Set actually APPLIED, to reject a late out-of-order response
 }
 
 // NewQuotaLimiter builds a legacy QuotaLimiter (permissive until the first broker Set)
@@ -68,12 +70,49 @@ func NewQuotaLimiterBudget(margin, windowLimit int, window time.Duration) *Quota
 	return &QuotaLimiter{margin: margin, windowLimit: windowLimit, window: window}
 }
 
-// Set installs the latest known remaining budget and window reset from the broker. It is
-// authoritative: it overrides the self-managed bootstrap estimate with real data.
-func (q *QuotaLimiter) Set(remaining int, resetAt time.Time) {
+// Snapshot returns the current totalSpent count as a token: the caller (RefreshQuota) reads
+// it BEFORE issuing the usage-metrics RPC, then hands it to Set alongside the RPC's answer,
+// so Set can tell exactly how many ops landed while that RPC was in flight and must be
+// re-subtracted from the broker's snapshot rather than silently erased.
+func (q *QuotaLimiter) Snapshot() int64 {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	q.remaining, q.resetAt, q.known = remaining, resetAt, true
+	return q.totalSpent
+}
+
+// Set installs the latest known remaining budget and window reset from the broker. now is
+// the PROCESSING clock reading at apply time (same domain as Allow/Spend — see clock.go);
+// token is the totalSpent snapshot Snapshot returned before the RPC that produced this
+// answer was issued.
+//
+// Set is authoritative but not blind:
+//   - A token older than the last one actually applied means this is a late, out-of-order
+//     response (RefreshQuota's poll loop is strictly sequential, but a defensive guard costs
+//     nothing) — ignored.
+//   - A resetAt that has already passed by the time this Set arrives carries a dead number:
+//     ignored, deferring to refreshWindow's self-heal on the next Allow/Spend instead of
+//     adopting an already-stale window. This guard only applies in fail-safe mode
+//     (windowLimit>0) — legacy mode has no self-heal to defer to, so it always applies.
+//   - Ops booked via Spend since token are re-subtracted from remaining: a Spend that raced
+//     the metrics RPC is real and must survive.
+//   - Within the SAME epoch (resetAt unchanged from the current one), the result is clamped
+//     to never exceed the local view — a broker snapshot cannot un-know a spend local
+//     tracking already recorded. A NEW epoch is not clamped: a fresh window's full budget
+//     does not inherit the old epoch's low remaining.
+func (q *QuotaLimiter) Set(remaining int, resetAt, now time.Time, token int64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if q.known && token < q.lastSetToken {
+		return // a late, out-of-order poll response — a newer one already landed
+	}
+	if q.windowLimit > 0 && !resetAt.After(now) {
+		return // this answer's own window had already rolled over by the time it arrived
+	}
+	computed := remaining - int(q.totalSpent-token)
+	if q.known && q.resetAt.Equal(resetAt) && computed > q.remaining {
+		computed = q.remaining // same epoch: never raise our belief above local tracking
+	}
+	q.remaining, q.resetAt, q.known, q.lastSetToken = computed, resetAt, true, token
 }
 
 // refreshWindow re-bootstraps the self-managed budget when its window has elapsed (fail-safe
@@ -114,6 +153,7 @@ func (q *QuotaLimiter) Allow(now time.Time, ops int) (bool, time.Time) {
 func (q *QuotaLimiter) Spend(now time.Time, ops int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.totalSpent += int64(ops)        // monotonic — Set reads this to re-subtract spends that raced its RPC
 	q.refreshWindow(now)              // fail-safe: lazily restore the budget when the window rolls over
 	if q.known || q.windowLimit > 0 { // track in both real and bootstrap modes
 		q.remaining -= ops

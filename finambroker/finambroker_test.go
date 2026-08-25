@@ -204,16 +204,19 @@ func TestPlacerLogLinesCarryLogTag(t *testing.T) {
 	}
 }
 
-// setOnlyQuota implements ONLY Set — not execengine.Limiter's Allow/Spend — to prove
-// RefreshQuota is wired against the narrow QuotaUpdater surface, not the concrete
-// execengine.QuotaLimiter type or the full Limiter interface.
+// setOnlyQuota implements ONLY QuotaUpdater's own two methods — not execengine.Limiter's
+// Allow/Spend — to prove RefreshQuota is wired against the narrow QuotaUpdater surface, not
+// the concrete execengine.QuotaLimiter type or the full Limiter interface.
 type setOnlyQuota struct {
 	remaining int
 	resetAt   time.Time
+	token     int64
 }
 
-func (s *setOnlyQuota) Set(remaining int, resetAt time.Time) {
-	s.remaining, s.resetAt = remaining, resetAt
+func (s *setOnlyQuota) Snapshot() int64 { return s.token }
+
+func (s *setOnlyQuota) Set(remaining int, resetAt, _ time.Time, token int64) {
+	s.remaining, s.resetAt, s.token = remaining, resetAt, token
 }
 
 var _ QuotaUpdater = (*setOnlyQuota)(nil)
