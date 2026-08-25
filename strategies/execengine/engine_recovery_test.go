@@ -322,7 +322,7 @@ func TestDeadStatusResolvesDeferredRetireImmediately(t *testing.T) {
 // a correctly hedged book as a divergence and suspend trading forever.
 func TestHedgeRatioReconcileExpectsScaledLegB(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
-	e := newSoloRatioTestEngine(m, tk, 2, 10)
+	e := newSoloRatioTestEngine(m, tk, 2)
 	seedBooks(e, openHour)
 	e.OnState(buyState(openHour))
 	e.OnFill(openHour, m.id(testLegA), testLegA, true, 2, 100)
@@ -341,7 +341,7 @@ func TestHedgeRatioReconcileExpectsScaledLegB(t *testing.T) {
 // a ratio-10 book is a real R-fold under-hedge and must be caught, not accepted.
 func TestHedgeRatioReconcileFlagsUnscaledLegB(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
-	e := newSoloRatioTestEngine(m, tk, 2, 10)
+	e := newSoloRatioTestEngine(m, tk, 2)
 	seedBooks(e, openHour)
 	e.OnState(buyState(openHour))
 	e.OnFill(openHour, m.id(testLegA), testLegA, true, 2, 100)

@@ -219,16 +219,16 @@ func (e *Engine) hedgeStrayMakerFill(orderID, symbol string, buy bool, lots int)
 // If every attempt fails, the hedge becomes a DEBT: the engine enters impaired mode
 // (all orders pulled, no new clips) and the obligation loop keeps trying to place it
 // until the broker accepts — waiting out the outage instead of tripping a kill-switch
-// on what is almost always connection trouble. Returns whether the hedge was placed NOW.
-func (e *Engine) takerRetry(symbol string, buy bool, lots int) bool {
+// on what is almost always connection trouble.
+func (e *Engine) takerRetry(symbol string, buy bool, lots int) {
 	if e.recovery.halted {
 		// The kill-switch is absolute. Callers pre-check halted, but a halt can fire MID
 		// sequence — settleClip issues up to two top-ups — so the choke point itself must
 		// refuse to trade.
 		e.critical("taker %s (buy=%v x%d) suppressed while halted — NOT hedged (kill-switch); hedge manually", symbol, buy, lots)
-		return false
+		return
 	}
-	return e.takerRetryFrom(symbol, buy, lots, 0)
+	e.takerRetryFrom(symbol, buy, lots, 0)
 }
 
 // takerRetryFrom continues the retry loop for symbol/buy/lots starting at attempt index
@@ -247,15 +247,15 @@ func (e *Engine) takerRetry(symbol string, buy bool, lots int) bool {
 // an entry or an exit (contrast tryOpenClip's ladder, which only ever applies to a CLOSING
 // clip's first placement, because there the size IS still being decided). Only the leftover
 // shrinkTakerChase could not place falls through to the unchanged attempts loop below.
-func (e *Engine) takerRetryFrom(symbol string, buy bool, lots int, from int) bool {
+func (e *Engine) takerRetryFrom(symbol string, buy bool, lots int, from int) {
 	if e.cfg.RejectRetryLotStep > 0 {
 		if remaining := e.shrinkTakerChase(symbol, buy, lots); remaining <= 0 {
-			return true
+			return
 		} else {
 			lots = remaining
 		}
 	}
-	return e.takerRetryPlain(symbol, buy, lots, from)
+	e.takerRetryPlain(symbol, buy, lots, from)
 }
 
 // takerRetryPlain is takerRetryFrom without the shrink-chase step: attempts-from retries at
@@ -268,19 +268,18 @@ func (e *Engine) takerRetryFrom(symbol string, buy bool, lots int, from int) boo
 // either leg DOES land (including later, on a retry from here), its sibling's takerRetryFrom
 // call is chasing a REAL, already-placed amount and shrinking it back into installments is
 // safe again — that asymmetric case goes through takerRetryFrom, not this.
-func (e *Engine) takerRetryPlain(symbol string, buy bool, lots int, from int) bool {
+func (e *Engine) takerRetryPlain(symbol string, buy bool, lots int, from int) {
 	attempts := e.cfg.HedgeRetries
 	if attempts < 1 {
 		attempts = 1
 	}
 	for i := from; i < attempts; i++ {
 		if e.tryPlaceTaker(symbol, buy, lots) {
-			return true
+			return
 		}
 	}
 	e.critical("taker %s (buy=%v x%d) failed %d attempts — queued as hedge debt; pulling orders and retrying until the broker answers", symbol, buy, lots, attempts)
 	e.deferHedge(symbol, buy, lots)
-	return false
 }
 
 // shrinkTakerChase tries to place lots of symbol/buy, and on a DEFINITIVE reject

@@ -70,7 +70,7 @@ func (s *Sim) startControl(addr string) (func() error, error) {
 	mux.HandleFunc("POST /v1/tokens/expire", c.expireTokens)
 	mux.HandleFunc("POST /v1/quota", c.quota)
 	mux.HandleFunc("POST /v1/automarket", c.autoMarket)
-	srv := &http.Server{Handler: mux}
+	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
 	go func() { _ = srv.Serve(lis) }()
 	// Останов — Shutdown, не Close: дожидается in-flight хендлеров, чтобы
 	// поздний ConfigureAutoMarket не делал wg.Add наперегонки с wg.Wait в

@@ -131,7 +131,7 @@ func TestSoloMakerLegHedgesLegBOnFill(t *testing.T) {
 // order on either leg — both legs cross the book as market orders immediately.
 func TestTakerOnlyPlacesNoMakerLegs(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
-	e := newTakerOnlyTestEngine(m, tk, 2)
+	e := newTakerOnlyTestEngine(m, tk)
 	seedBooks(e, openHour)
 
 	e.OnState(buyState(openHour))
@@ -149,7 +149,7 @@ func TestTakerOnlyPlacesNoMakerLegs(t *testing.T) {
 // committed immediately — position moves without waiting for a fill event.
 func TestTakerOnlyExecutesBothLegsAsTaker(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
-	e := newTakerOnlyTestEngine(m, tk, 2)
+	e := newTakerOnlyTestEngine(m, tk)
 	seedBooks(e, openHour)
 
 	e.OnState(buyState(openHour))
@@ -167,7 +167,7 @@ func TestTakerOnlyExecutesBothLegsAsTaker(t *testing.T) {
 
 func TestTakerOnlySellCrossesOppositeSides(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
-	e := newTakerOnlyTestEngine(m, tk, 2)
+	e := newTakerOnlyTestEngine(m, tk)
 	seedBooks(e, openHour)
 
 	e.OnState(sellState(openHour))
@@ -189,7 +189,7 @@ func TestTakerOnlySellCrossesOppositeSides(t *testing.T) {
 // retry while the engine enters impaired mode.
 func TestTakerOnlyOnTakerFailureQueuesDebt(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{fail: true} // taker will fail all attempts
-	e := newTakerOnlyTestEngine(m, tk, 2)
+	e := newTakerOnlyTestEngine(m, tk)
 	seedBooks(e, openHour)
 
 	e.OnState(buyState(openHour))
@@ -228,7 +228,7 @@ func TestTakerOnlyOnTakerFailureQueuesDebt(t *testing.T) {
 func TestTakerOnlyOnOneLegFailureKeepsOtherLegLanded(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
 	tk.failSym = map[string]bool{testLegB: true} // legA taker succeeds, legB taker fails
-	e := newTakerOnlyTestEngine(m, tk, 2)
+	e := newTakerOnlyTestEngine(m, tk)
 	seedBooks(e, openHour)
 
 	e.OnState(buyState(openHour))
@@ -273,7 +273,7 @@ func TestTakerOnlyOnOneLegFailureKeepsOtherLegLanded(t *testing.T) {
 // deadlocks against it and this test times out.
 func TestTakerOnlyDispatchesBothLegsConcurrently(t *testing.T) {
 	m, tk := &fakeMaker{}, newBarrierTaker()
-	e := newTakerOnlyTestEngine(m, tk, 2)
+	e := newTakerOnlyTestEngine(m, tk)
 	seedBooks(e, openHour)
 
 	done := make(chan struct{})
@@ -907,7 +907,7 @@ func TestPullDropsPartiallyFilledEntryRemainder(t *testing.T) {
 // signal until it has rested its guaranteed time — then the pull goes through.
 func TestMinRestDelaysPull(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
-	e := newEngineWith(EngineConfig{LegA: testLegA, LegB: testLegB, OrderVol: 2, HedgeRetries: 2, MinRest: 3 * time.Second}, m, tk, newTestDecider(20, 2))
+	e := newEngineWith(EngineConfig{LegA: testLegA, LegB: testLegB, OrderVol: 2, HedgeRetries: 2, MinRest: 3 * time.Second}, m, tk, newTestDecider(2))
 	seedBooks(e, openHour)
 	e.OnState(buyState(openHour))
 	if !e.Working() {
@@ -1845,7 +1845,7 @@ func TestClipFillGarbledSymbolStillPairs(t *testing.T) {
 // very path that exists to guarantee balance.
 func TestHedgeRatioScalesSettleTopUp(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
-	e := newSoloRatioTestEngine(m, tk, 4, 10)
+	e := newSoloRatioTestEngine(m, tk, 4)
 	seedBooks(e, openHour)
 	e.OnState(buyState(openHour))
 	legAID := m.id(testLegA)
@@ -1871,7 +1871,7 @@ func TestHedgeRatioScalesCancelCaughtFill(t *testing.T) {
 		LegA: testLegA, LegB: testLegB, OrderVol: 4,
 		FillTimeout: 2 * time.Minute, HedgeRetries: 2,
 		SoloMakerLeg: true, HedgeRatio: 10, KeepPartialOpenOnTimeout: true,
-	}, m, tk, newTestDecider(20, 4))
+	}, m, tk, newTestDecider(4))
 	seedBooks(e, openHour)
 	e.OnState(buyState(openHour))
 	legAID := m.id(testLegA)

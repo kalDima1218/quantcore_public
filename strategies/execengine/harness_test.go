@@ -339,7 +339,7 @@ const (
 var openHour = time.Date(2026, 1, 5, 8, 0, 0, 0, time.UTC)
 
 func newTestEngine(m Maker, tk Taker, orderVol int) *Engine {
-	dm := newTestDecider(20, orderVol) // no persistence
+	dm := newTestDecider(orderVol) // no persistence
 	return newEngineWith(EngineConfig{
 		LegA: testLegA, LegB: testLegB, OrderVol: orderVol,
 		FillTimeout: 2 * time.Minute, HedgeRetries: 2,
@@ -377,7 +377,7 @@ func holdState(ts time.Time) RowState {
 // newSoloTestEngine builds a single-passive engine: LegA (the dated leg) is the ONLY maker
 // leg; LegB (the perp leg) is never rested and is always taker-hedged on the LegA fill.
 func newSoloTestEngine(m Maker, tk Taker, orderVol int) *Engine {
-	dm := newTestDecider(20, orderVol)
+	dm := newTestDecider(orderVol)
 	return newEngineWith(EngineConfig{
 		LegA: testLegA, LegB: testLegB, OrderVol: orderVol,
 		FillTimeout: 2 * time.Minute, HedgeRetries: 2,
@@ -385,24 +385,24 @@ func newSoloTestEngine(m Maker, tk Taker, orderVol int) *Engine {
 	}, m, tk, dm)
 }
 
-// newSoloRatioTestEngine builds a single-passive engine whose LegB hedge is `ratio` contracts
-// per ONE LegA contract — the asymmetric-notional pair (one index future against ten minis).
+// newSoloRatioTestEngine builds a single-passive engine whose LegB hedge is 10 contracts per
+// ONE LegA contract — the asymmetric-notional pair (one index future against ten minis).
 // Solo is the only mode HedgeRatio supports; see EngineConfig.HedgeRatio.
-func newSoloRatioTestEngine(m Maker, tk Taker, orderVol, ratio int) *Engine {
-	dm := newTestDecider(20, orderVol)
+func newSoloRatioTestEngine(m Maker, tk Taker, orderVol int) *Engine {
+	dm := newTestDecider(orderVol)
 	return newEngineWith(EngineConfig{
 		LegA: testLegA, LegB: testLegB, OrderVol: orderVol,
 		FillTimeout: 2 * time.Minute, HedgeRetries: 2,
-		SoloMakerLeg: true, HedgeRatio: ratio,
+		SoloMakerLeg: true, HedgeRatio: 10,
 	}, m, tk, dm)
 }
 
 // newTakerOnlyTestEngine builds an engine where a decided move never rests a maker order —
 // both legs cross the book as takers immediately.
-func newTakerOnlyTestEngine(m Maker, tk Taker, orderVol int) *Engine {
-	dm := newTestDecider(20, orderVol)
+func newTakerOnlyTestEngine(m Maker, tk Taker) *Engine {
+	dm := newTestDecider(2)
 	return newEngineWith(EngineConfig{
-		LegA: testLegA, LegB: testLegB, OrderVol: orderVol,
+		LegA: testLegA, LegB: testLegB, OrderVol: 2,
 		FillTimeout: 2 * time.Minute, HedgeRetries: 2,
 		TakerOnly: true,
 	}, m, tk, dm)
@@ -426,8 +426,8 @@ func (d *fixedDecider) Commit(in Intent, _ time.Time) Decision {
 }
 func (d *fixedDecider) Position() int { return d.pos }
 
-func newTestDecider(positionMax, orderSize int) *testDecider {
-	return &testDecider{orderSize: orderSize, positionMax: positionMax}
+func newTestDecider(orderSize int) *testDecider {
+	return &testDecider{orderSize: orderSize, positionMax: 20}
 }
 
 // recordSink captures FillSink credits so tests can assert the position the live ledger

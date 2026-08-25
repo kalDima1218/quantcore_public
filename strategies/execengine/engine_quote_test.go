@@ -14,7 +14,7 @@ import (
 // restarts the guarantee (the pull right after a re-peg is refused again).
 func TestMinRestDelaysRepeg(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
-	e := newEngineWith(EngineConfig{LegA: testLegA, LegB: testLegB, OrderVol: 2, HedgeRetries: 2, MinRest: 3 * time.Second}, m, tk, newTestDecider(20, 2))
+	e := newEngineWith(EngineConfig{LegA: testLegA, LegB: testLegB, OrderVol: 2, HedgeRetries: 2, MinRest: 3 * time.Second}, m, tk, newTestDecider(2))
 	seedBooks(e, openHour)
 	e.OnState(buyState(openHour))
 	bidA := m.id(testLegA)
@@ -121,7 +121,7 @@ func TestNoRepegAfterFirstFill(t *testing.T) {
 
 func TestStaleBookSuppressesQuoting(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
-	dm := newTestDecider(20, 2)
+	dm := newTestDecider(2)
 	e := newEngineWith(EngineConfig{
 		LegA: testLegA, LegB: testLegB, OrderVol: 2,
 		FillTimeout: time.Minute, HedgeRetries: 2, MaxStaleness: time.Second,
@@ -303,7 +303,7 @@ func TestRepegLimiterDenialSkipsBeforeCancel(t *testing.T) {
 // DisableRepeg (basis post-and-wait): an out-quoted leg stays exactly where it was posted.
 func TestDisableRepegLeavesOutQuotedOrderResting(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
-	dm := newTestDecider(20, 2)
+	dm := newTestDecider(2)
 	e := newEngineWith(EngineConfig{
 		LegA: testLegA, LegB: testLegB, OrderVol: 2, HedgeRetries: 2, DisableRepeg: true,
 	}, m, tk, dm)
@@ -418,7 +418,7 @@ func TestOutOfOrderBookUpdateIgnored(t *testing.T) {
 // arrive. No halt, no operator: pull, wait for data, come back.
 func TestStaleBooksPullOrdersAndResumeWithData(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
-	dm := newTestDecider(20, 2)
+	dm := newTestDecider(2)
 	e := newEngineWith(EngineConfig{
 		LegA: testLegA, LegB: testLegB, OrderVol: 2, HedgeRetries: 2,
 		MaxStaleness: 5 * time.Second, PullOnStaleBook: true,

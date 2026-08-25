@@ -113,7 +113,7 @@ func TestGetConnSettlesClosedUnderConcurrentReadyFlicker(t *testing.T) {
 				default:
 				}
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Millisecond)
-				c.GetConn(ctx) // discarded: concurrent with an in-progress close, either answer is valid here
+				_, _ = c.GetConn(ctx) // discarded: concurrent with an in-progress close, either answer is valid here
 				cancel()
 			}
 		}()

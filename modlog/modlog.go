@@ -119,8 +119,8 @@ func Trades() *Logger {
 
 func openLogFile(module string) (*os.File, error) {
 	d := dir()
-	if err := os.MkdirAll(d, 0o755); err != nil {
+	if err := os.MkdirAll(d, 0o750); err != nil {
 		return nil, err
 	}
-	return os.OpenFile(filepath.Join(d, module+".log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	return os.OpenFile(filepath.Join(d, module+".log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600) //nolint:gosec // module is an internal caller-chosen tag (execengine/basis/trades/...), never external input
 }

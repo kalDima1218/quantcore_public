@@ -665,7 +665,7 @@ func TestHedgeShrinkChaseAccumulatesToOwedTotal(t *testing.T) {
 		LegA: testLegA, LegB: testLegB, OrderVol: 10,
 		FillTimeout: 2 * time.Minute, HedgeRetries: 2,
 		RejectRetryLotStep: 2, RejectRetryMinLots: 2,
-	}, m, tk, newTestDecider(20, 10))
+	}, m, tk, newTestDecider(10))
 	seedBooks(e, openHour)
 	e.OnState(buyState(openHour))
 	legAID := m.id(testLegA)
@@ -704,7 +704,7 @@ func TestHedgeShrinkChaseExhaustsToDebtWhenFloorStillRejects(t *testing.T) {
 		LegA: testLegA, LegB: testLegB, OrderVol: 10,
 		FillTimeout: 2 * time.Minute, HedgeRetries: 1,
 		RejectRetryLotStep: 2, RejectRetryMinLots: 2,
-	}, m, tk, newTestDecider(20, 10))
+	}, m, tk, newTestDecider(10))
 	seedBooks(e, openHour)
 	e.OnState(buyState(openHour))
 	legAID := m.id(testLegA)
@@ -733,7 +733,7 @@ func TestHedgeShrinkChaseSkipsAmbiguousError(t *testing.T) {
 		LegA: testLegA, LegB: testLegB, OrderVol: 10,
 		FillTimeout: 2 * time.Minute, HedgeRetries: 2,
 		RejectRetryLotStep: 2, RejectRetryMinLots: 2,
-	}, m, tk, newTestDecider(20, 10))
+	}, m, tk, newTestDecider(10))
 	seedBooks(e, openHour)
 	e.OnState(buyState(openHour))
 	legAID := m.id(testLegA)
@@ -781,7 +781,7 @@ func TestHedgeShrinkChaseDisabledByDefault(t *testing.T) {
 // would leave an R-fold naked leg.
 func TestHedgeRatioScalesLegBTakerOnMakerFill(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
-	e := newSoloRatioTestEngine(m, tk, 2, 10)
+	e := newSoloRatioTestEngine(m, tk, 2)
 	seedBooks(e, openHour)
 	e.OnState(buyState(openHour))
 	legAID := m.id(testLegA)
@@ -801,7 +801,7 @@ func TestHedgeRatioScalesLegBTakerOnMakerFill(t *testing.T) {
 // multiply the whole clip instead of hedging it.
 func TestHedgeRatioLeavesLegAMakerUnscaled(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
-	e := newSoloRatioTestEngine(m, tk, 3, 10)
+	e := newSoloRatioTestEngine(m, tk, 3)
 	seedBooks(e, openHour)
 
 	e.OnState(buyState(openHour))
@@ -816,7 +816,7 @@ func TestHedgeRatioLeavesLegAMakerUnscaled(t *testing.T) {
 // happens, so the book is never naked between partials.
 func TestHedgeRatioScalesPartialMakerFills(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
-	e := newSoloRatioTestEngine(m, tk, 4, 10)
+	e := newSoloRatioTestEngine(m, tk, 4)
 	seedBooks(e, openHour)
 	e.OnState(buyState(openHour))
 	legAID := m.id(testLegA)
@@ -844,7 +844,7 @@ func TestHedgeRatioWithoutSoloMakerRefusesToTrade(t *testing.T) {
 		LegA: testLegA, LegB: testLegB, OrderVol: 2,
 		FillTimeout: 2 * time.Minute, HedgeRetries: 2,
 		HedgeRatio: 10, // no SoloMakerLeg
-	}, m, tk, newTestDecider(20, 2))
+	}, m, tk, newTestDecider(2))
 	seedBooks(e, openHour)
 
 	e.OnState(buyState(openHour))
@@ -864,7 +864,7 @@ func TestHedgeRatioWithoutSoloMakerRefusesToTrade(t *testing.T) {
 // NOTHING, the same "waiting, never guessing" rule the deferred-retire path follows.
 func TestHedgeRatioRefusesToUnscaleAStrayLegBFill(t *testing.T) {
 	m, tk := &fakeMaker{}, &fakeTaker{}
-	e := newSoloRatioTestEngine(m, tk, 2, 10)
+	e := newSoloRatioTestEngine(m, tk, 2)
 	seedBooks(e, openHour)
 
 	e.hedgeStrayMakerFill("ghost", testLegB, true, 7)
@@ -884,7 +884,7 @@ func TestHedgeRatioScalesTakerOnlyLegB(t *testing.T) {
 		LegA: testLegA, LegB: testLegB, OrderVol: 2,
 		FillTimeout: 2 * time.Minute, HedgeRetries: 2,
 		TakerOnly: true, HedgeRatio: 10,
-	}, m, tk, newTestDecider(20, 2))
+	}, m, tk, newTestDecider(2))
 	seedBooks(e, openHour)
 
 	e.OnState(buyState(openHour))

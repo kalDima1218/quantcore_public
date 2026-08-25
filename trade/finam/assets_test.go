@@ -112,7 +112,7 @@ func TestMonitorMarketOpenRecomputesLocallyAcrossBoundary(t *testing.T) {
 	}
 
 	var fetchCalls int32
-	fetch := func() ([]session, error) {
+	fetch := func() ([]session, error) { //nolint:unparam // shape fixed by monitorMarketOpen's fetch param; this fixture never errors
 		atomic.AddInt32(&fetchCalls, 1)
 		return sessions, nil
 	}
@@ -169,7 +169,7 @@ func TestMonitorMarketOpenRefetchesWhenWindowExhausted(t *testing.T) {
 	second := []session{{sessionType: "CORE_TRADING", start: now.Add(-time.Hour), end: now.Add(time.Hour)}}
 
 	var calls int32
-	fetch := func() ([]session, error) {
+	fetch := func() ([]session, error) { //nolint:unparam // shape fixed by monitorMarketOpen's fetch param; this fixture never errors
 		if atomic.AddInt32(&calls, 1) == 1 {
 			return first, nil
 		}
@@ -205,7 +205,7 @@ func TestMonitorMarketOpenRefetchesOnSafetyNetEvenWithinWindow(t *testing.T) {
 	sessions := []session{{sessionType: "CORE_TRADING", start: now.Add(-time.Hour), end: now.Add(time.Hour)}}
 
 	var calls int32
-	fetch := func() ([]session, error) {
+	fetch := func() ([]session, error) { //nolint:unparam // shape fixed by monitorMarketOpen's fetch param; this fixture never errors
 		atomic.AddInt32(&calls, 1)
 		return sessions, nil
 	}
@@ -246,7 +246,7 @@ func TestMonitorMarketOpenRetriesQuicklyWhenWindowExhausted(t *testing.T) {
 	sessions := []session{{sessionType: "CORE_TRADING", start: now.Add(-time.Hour), end: now.Add(-time.Minute)}}
 
 	var calls int32
-	fetch := func() ([]session, error) {
+	fetch := func() ([]session, error) { //nolint:unparam // shape fixed by monitorMarketOpen's fetch param; this fixture never errors
 		atomic.AddInt32(&calls, 1)
 		return sessions, nil
 	}
@@ -291,7 +291,7 @@ func TestMonitorMarketOpenSafetyNetIsReArmedOnEveryFetch(t *testing.T) {
 
 	var calls int32
 	var safetyCalls int32
-	fetch := func() ([]session, error) {
+	fetch := func() ([]session, error) { //nolint:unparam // shape fixed by monitorMarketOpen's fetch param; this fixture never errors
 		atomic.AddInt32(&calls, 1)
 		return sessions, nil
 	}

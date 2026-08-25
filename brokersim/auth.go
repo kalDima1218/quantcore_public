@@ -52,7 +52,7 @@ func (a *authService) Auth(ctx context.Context, req *auth.AuthRequest) (*auth.Au
 }
 
 const (
-	simTokenPrefix = "eyJhbGciOiJTSU0ifQ." // {"alg":"SIM"}
+	simTokenPrefix = "eyJhbGciOiJTSU0ifQ." //nolint:gosec // not a credential — a fixed simulator token marker, {"alg":"SIM"}
 	simTokenSuffix = ".sim"
 )
 

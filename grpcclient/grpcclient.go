@@ -37,6 +37,7 @@ type Client struct {
 func NewClient(addr string, extraOpts ...grpc.DialOption) (*Client, error) {
 	return newClient(addr, credentials.NewTLS(&tls.Config{
 		InsecureSkipVerify: false,
+		MinVersion:         tls.VersionTLS12,
 	}), extraOpts...)
 }
 
