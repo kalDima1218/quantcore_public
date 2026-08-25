@@ -37,7 +37,7 @@ type EngineConfig struct {
 	// places that share the same knobs but not the same reasoning:
 	//
 	// 1. A CLOSING clip's (Intent.IsClose) FIRST placement attempt (tryOpenClip/openClip):
-	// when the broker DEFINITIVELY rejects it (maybeDelivered == false — the broker
+	// when the broker DEFINITIVELY rejects it (MaybeDelivered == false — the broker
 	// answered, nothing rests; e.g. insufficient margin, not a transport hiccup or the
 	// ambiguous/corrupted-id cases placeLeg itself flags), the engine retries the SAME clip
 	// at lots-RejectRetryLotStep, then again, down to RejectRetryMinLots (floor 1 if
@@ -166,7 +166,7 @@ type Engine struct {
 	maker   Maker
 	taker   Taker
 	limiter Limiter
-	clock   Clock // processing-time source for quota bookkeeping (Allow/Spend) — see clock.go
+	clock   Clock    // processing-time source for quota bookkeeping (Allow/Spend) — see clock.go
 	sink    FillSink // optional (live only): fed the engine's acted-on executions as they happen — see FillSink; credited in OnFill/finishRetire/tryPlaceTaker
 
 	backoffUntil time.Time // suppress opening new clips until this time (rate-limit / failure backoff)

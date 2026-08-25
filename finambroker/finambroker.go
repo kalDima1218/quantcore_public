@@ -154,16 +154,19 @@ func (p *placer) nextClientID() string {
 // engine: found there → "placed, here is its id"; absent → still unresolved, since GetOrders
 // excludes terminal orders (see trade/finam.GetOrders) and cannot distinguish "never placed"
 // from "placed and already settled" — the original ambiguous error propagates unchanged.
-// It shares execengine.MaybeDelivered with the reject-retry ladder (engine_clip.go/
-// engine_hedge.go) so both agree on what "ambiguous" means for the same broker error.
+// A DEFINITIVE result — a genuine business rejection, classified by ambiguous() (the only
+// place in this package that knows gRPC codes) — is marked via execengine.NewDefinitiveReject
+// before it crosses into execengine, so the broker-neutral execengine.MaybeDelivered agrees
+// with this package's own gRPC-aware classification for the same error without needing to
+// know gRPC itself.
 func (p *placer) placeResolved(kind orderKind, symbol string, lots int, price float64) (string, error) {
 	cid := p.nextClientID()
 	st, err := p.place(kind, symbol, lots, price, cid)
 	if err == nil {
 		return st.GetOrderId(), nil
 	}
-	if !execengine.MaybeDelivered(err) {
-		return "", err // the broker answered: rejected, nothing rests
+	if !ambiguous(err) {
+		return "", execengine.NewDefinitiveReject(err) // the broker answered: rejected, nothing rests
 	}
 	p.logf("place %s x%d failed in transport (%v) — the order MAY have reached the broker; resolving by client id %s", symbol, lots, err, cid)
 	sawAbsent := false

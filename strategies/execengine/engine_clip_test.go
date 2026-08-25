@@ -1291,7 +1291,7 @@ func TestRejectRetryLadderShrinksToFillableSize(t *testing.T) {
 		RejectRetryLotStep: 2, RejectRetryMinLots: 2,
 	}, m, tk, dm)
 	seedBooks(e, openHour)
-	m.placeErr = map[string]error{testLegA: status.Error(codes.InvalidArgument, "insufficient funds")}
+	m.placeErr = map[string]error{testLegA: NewDefinitiveReject(errors.New("insufficient funds"))}
 	m.placeErrMaxLots = map[string]int{testLegA: 6} // broker accepts ≤6
 
 	e.OnState(RowState{Time: openHour})
@@ -1319,7 +1319,7 @@ func TestRejectRetryLadderNeverAppliesToOpeningClips(t *testing.T) {
 		RejectRetryLotStep: 2, RejectRetryMinLots: 2,
 	}, m, tk, dm)
 	seedBooks(e, openHour)
-	m.placeErr = map[string]error{testLegA: status.Error(codes.InvalidArgument, "insufficient funds")}
+	m.placeErr = map[string]error{testLegA: NewDefinitiveReject(errors.New("insufficient funds"))}
 	m.placeErrMaxLots = map[string]int{testLegA: 6} // would have been fillable smaller — must not matter
 
 	e.OnState(RowState{Time: openHour})
@@ -1342,7 +1342,7 @@ func TestRejectRetryLadderGivesUpBelowFloor(t *testing.T) {
 		RejectRetryLotStep: 3, RejectRetryMinLots: 4,
 	}, m, tk, dm)
 	seedBooks(e, openHour)
-	m.placeErr = map[string]error{testLegA: status.Error(codes.InvalidArgument, "insufficient funds")}
+	m.placeErr = map[string]error{testLegA: NewDefinitiveReject(errors.New("insufficient funds"))}
 
 	e.OnState(RowState{Time: openHour})
 
@@ -1387,7 +1387,7 @@ func TestRejectRetryLadderDisabledByDefault(t *testing.T) {
 		LegA: testLegA, LegB: testLegB, OrderVol: 10, HedgeRetries: 2,
 	}, m, tk, dm)
 	seedBooks(e, openHour)
-	m.placeErr = map[string]error{testLegA: status.Error(codes.InvalidArgument, "insufficient funds")}
+	m.placeErr = map[string]error{testLegA: NewDefinitiveReject(errors.New("insufficient funds"))}
 	m.placeErrMaxLots = map[string]int{testLegA: 6}
 
 	e.OnState(RowState{Time: openHour})
@@ -1412,7 +1412,7 @@ func TestRejectRetryLadderRechecksQuotaMidLadder(t *testing.T) {
 	lim := &stubLimiter{ok: true, allowN: 1, retryAt: openHour.Add(10 * time.Second)}
 	e.SetLimiter(lim)
 	seedBooks(e, openHour)
-	m.placeErr = map[string]error{testLegA: status.Error(codes.InvalidArgument, "insufficient funds")}
+	m.placeErr = map[string]error{testLegA: NewDefinitiveReject(errors.New("insufficient funds"))}
 
 	e.OnState(RowState{Time: openHour})
 
@@ -1436,7 +1436,7 @@ func TestRejectRetryLadderDoesNotShrinkLegBAfterLegAPlaced(t *testing.T) {
 		RejectRetryLotStep: 2, RejectRetryMinLots: 2,
 	}, m, tk, dm)
 	seedBooks(e, openHour)
-	m.placeErr = map[string]error{testLegB: status.Error(codes.InvalidArgument, "insufficient funds")}
+	m.placeErr = map[string]error{testLegB: NewDefinitiveReject(errors.New("insufficient funds"))}
 	m.placeErrMaxLots = map[string]int{testLegB: 6} // would have been fillable smaller — must not matter
 
 	e.OnState(RowState{Time: openHour})
@@ -1470,7 +1470,7 @@ func TestRejectRetryLadderClosesTakerOnlyClipInFullWhenBothLegsRejectCleanly(t *
 		RejectRetryLotStep: 2, RejectRetryMinLots: 2,
 	}, m, tk, dm)
 	seedBooks(e, openHour)
-	rej := status.Error(codes.InvalidArgument, "insufficient funds")
+	rej := NewDefinitiveReject(errors.New("insufficient funds"))
 	tk.failErrSym = map[string]error{testLegA: rej, testLegB: rej}
 	tk.failMaxLots = map[string]int{testLegA: 6, testLegB: 6} // broker accepts ≤6 on both
 
@@ -1510,7 +1510,7 @@ func TestRejectRetryLadderRecoversTakerOnlyWhenOneLegLands(t *testing.T) {
 		RejectRetryLotStep: 2, RejectRetryMinLots: 2,
 	}, m, tk, dm)
 	seedBooks(e, openHour)
-	tk.failErrSym = map[string]error{testLegB: status.Error(codes.InvalidArgument, "insufficient funds")}
+	tk.failErrSym = map[string]error{testLegB: NewDefinitiveReject(errors.New("insufficient funds"))}
 	tk.failMaxLots = map[string]int{testLegB: 6} // broker accepts legB orders up to 6 lots
 
 	e.OnState(RowState{Time: openHour})
@@ -1541,7 +1541,7 @@ func TestRejectRetryLadderDebtsTakerOnlyWhenFloorStillRejects(t *testing.T) {
 		RejectRetryLotStep: 2, RejectRetryMinLots: 2,
 	}, m, tk, dm)
 	seedBooks(e, openHour)
-	tk.failErrSym = map[string]error{testLegB: status.Error(codes.InvalidArgument, "insufficient funds")}
+	tk.failErrSym = map[string]error{testLegB: NewDefinitiveReject(errors.New("insufficient funds"))}
 
 	e.OnState(RowState{Time: openHour})
 
@@ -1598,7 +1598,7 @@ func TestRejectRetryLadderNeverAppliesToOpeningTakerOnlyClips(t *testing.T) {
 		RejectRetryLotStep: 2, RejectRetryMinLots: 2,
 	}, m, tk, dm)
 	seedBooks(e, openHour)
-	rej := status.Error(codes.InvalidArgument, "insufficient funds")
+	rej := NewDefinitiveReject(errors.New("insufficient funds"))
 	tk.failErrSym = map[string]error{testLegA: rej, testLegB: rej}
 	tk.failMaxLots = map[string]int{testLegA: 6, testLegB: 6} // would have been fillable smaller — must not matter
 

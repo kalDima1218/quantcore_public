@@ -8,9 +8,6 @@ import (
 	"errors"
 	"testing"
 	"time"
-
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // --- first fill hedges the other leg: direction, counterpart races, and the no-taker case when both legs land passively ---
@@ -672,7 +669,7 @@ func TestHedgeShrinkChaseAccumulatesToOwedTotal(t *testing.T) {
 	seedBooks(e, openHour)
 	e.OnState(buyState(openHour))
 	legAID := m.id(testLegA)
-	tk.failErrSym = map[string]error{testLegB: status.Error(codes.InvalidArgument, "insufficient funds")}
+	tk.failErrSym = map[string]error{testLegB: NewDefinitiveReject(errors.New("insufficient funds"))}
 	tk.failMaxLots = map[string]int{testLegB: 6} // broker accepts legB orders up to 6 lots
 
 	e.OnFill(openHour, legAID, testLegA, true, 10, 100)
@@ -711,7 +708,7 @@ func TestHedgeShrinkChaseExhaustsToDebtWhenFloorStillRejects(t *testing.T) {
 	seedBooks(e, openHour)
 	e.OnState(buyState(openHour))
 	legAID := m.id(testLegA)
-	tk.failErrSym = map[string]error{testLegB: status.Error(codes.InvalidArgument, "insufficient funds")}
+	tk.failErrSym = map[string]error{testLegB: NewDefinitiveReject(errors.New("insufficient funds"))}
 
 	e.OnFill(openHour, legAID, testLegA, true, 10, 100)
 
@@ -762,7 +759,7 @@ func TestHedgeShrinkChaseDisabledByDefault(t *testing.T) {
 	seedBooks(e, openHour)
 	e.OnState(buyState(openHour))
 	legAID := m.id(testLegA)
-	tk.failErrSym = map[string]error{testLegB: status.Error(codes.InvalidArgument, "insufficient funds")}
+	tk.failErrSym = map[string]error{testLegB: NewDefinitiveReject(errors.New("insufficient funds"))}
 
 	e.OnFill(openHour, legAID, testLegA, true, 10, 100)
 

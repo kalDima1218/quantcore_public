@@ -3,26 +3,56 @@ package execengine
 import (
 	"errors"
 	"testing"
-
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
-// The transport-error classifier: only errors that leave the order's fate unknown may
-// trigger the reject-retry ladder / ghost-order resolution; broker verdicts must not.
+// MaybeDelivered is broker-neutral: it classifies by MARKER, never by transport-specific
+// error shape (see finambroker's own gRPC-code classifier for that). Only errors that leave
+// the order's fate unknown may trigger the reject-retry ladder / ghost-order resolution.
 func TestMaybeDeliveredClassification(t *testing.T) {
-	for _, c := range []codes.Code{codes.Unavailable, codes.DeadlineExceeded, codes.Canceled, codes.Unknown, codes.Internal, codes.DataLoss, codes.Aborted} {
-		if !MaybeDelivered(status.Error(c, "x")) {
-			t.Fatalf("%v must count as possibly delivered", c)
-		}
+	if MaybeDelivered(nil) {
+		t.Fatal("nil (success) must never count as possibly delivered")
 	}
-	for _, c := range []codes.Code{codes.InvalidArgument, codes.FailedPrecondition, codes.PermissionDenied, codes.NotFound, codes.ResourceExhausted, codes.Unauthenticated, codes.AlreadyExists, codes.OutOfRange} {
-		if MaybeDelivered(status.Error(c, "x")) {
-			t.Fatalf("%v is a definitive broker answer — no resolution", c)
-		}
+
+	unmarked := errors.New("dial tcp: broken pipe")
+	if !MaybeDelivered(unmarked) {
+		t.Fatal("an unmarked error must default to ambiguous — never assume success or failure")
 	}
-	// Plain (non-gRPC) errors map to codes.Unknown: fate unknown → resolve.
-	if !MaybeDelivered(errors.New("dial tcp: broken pipe")) {
-		t.Fatal("a non-gRPC transport error leaves the fate unknown")
+
+	reject := NewDefinitiveReject(errors.New("insufficient funds"))
+	if MaybeDelivered(reject) {
+		t.Fatal("a definitive reject must not count as possibly delivered")
+	}
+
+	confirmed := NewConfirmedNotPlaced(errors.New("authoritatively absent"))
+	if MaybeDelivered(confirmed) {
+		t.Fatal("a confirmed-not-placed outcome must not count as possibly delivered")
+	}
+}
+
+// Both constructors must preserve the original error through Unwrap, so a caller can still
+// inspect the underlying broker error (e.g. for logging or errors.Is against a sentinel)
+// alongside the classification.
+func TestOutcomeMarkersUnwrapToOriginalError(t *testing.T) {
+	original := errors.New("insufficient funds")
+	wrapped := NewDefinitiveReject(original)
+	if !errors.Is(wrapped, original) {
+		t.Fatal("NewDefinitiveReject must preserve the original error through Unwrap")
+	}
+
+	original2 := errors.New("absent")
+	wrapped2 := NewConfirmedNotPlaced(original2)
+	if !errors.Is(wrapped2, original2) {
+		t.Fatal("NewConfirmedNotPlaced must preserve the original error through Unwrap")
+	}
+}
+
+// Wrapping nil must stay nil — a broker adapter that mistakenly wraps a successful (nil)
+// result must not manufacture a non-nil error out of it.
+func TestOutcomeMarkersNilInNilOut(t *testing.T) {
+	if err := NewDefinitiveReject(nil); err != nil {
+		t.Fatalf("NewDefinitiveReject(nil) = %v, want nil", err)
+	}
+	if err := NewConfirmedNotPlaced(nil); err != nil {
+		t.Fatalf("NewConfirmedNotPlaced(nil) = %v, want nil", err)
 	}
 }
