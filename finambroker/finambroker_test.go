@@ -49,7 +49,7 @@ func testPlacer(place func(cid string) (*orders.OrderState, error), find func(ci
 	p.place = func(_ orderKind, _ string, _ int, _ float64, cid string) (*orders.OrderState, error) {
 		return place(cid)
 	}
-	p.find = func(cid string) (string, bool, error) { return find(cid) }
+	p.find = func(cid, _ string, _ bool, _ int) (string, bool, error) { return find(cid) }
 	return p
 }
 
@@ -145,8 +145,8 @@ func TestPlacerTimeoutThenAlreadyExecutedGhostIsNotConfirmedAbsent(t *testing.T)
 }
 
 // The order list answering only on the LAST probe still resolves (the ghost needed a
-// moment to appear); an order list that never answers reports a distinct unresolved
-// failure so the log trail shows the ambiguity.
+// moment to appear); an order list that never answers across every round reports a
+// distinct unresolved failure so the log trail shows the ambiguity.
 func TestPlacerResolutionRetriesAndUnresolvedIsLoud(t *testing.T) {
 	calls := 0
 	p := testPlacer(
@@ -173,8 +173,65 @@ func TestPlacerResolutionRetriesAndUnresolvedIsLoud(t *testing.T) {
 	if err == nil {
 		t.Fatal("an unresolvable placement must fail")
 	}
-	if calls != ghostProbes {
-		t.Fatalf("resolution must exhaust its probes before giving up, got %d want %d", calls, ghostProbes)
+	if want := ghostProbes * cidRetryRounds; calls != want {
+		t.Fatalf("resolution must exhaust every round's probes before giving up, got %d want %d", calls, want)
+	}
+}
+
+// The core of the same-cid fix: every placement retry and every resolution probe across
+// ALL rounds reuses the ORIGINAL client id — placeResolved must never mint a new one while
+// still trying to resolve an ambiguous outcome, since a fresh id on a retry is exactly what
+// risked placing a second, independently-tracked order beside one that actually landed.
+func TestPlacerRetriesPlacementWithTheSameClientID(t *testing.T) {
+	var placeCIDs, findCIDs []string
+	placements := 0
+	p := testPlacer(
+		func(cid string) (*orders.OrderState, error) {
+			placeCIDs = append(placeCIDs, cid)
+			placements++
+			if placements < cidRetryRounds {
+				return nil, status.Error(codes.Unavailable, "down")
+			}
+			return &orders.OrderState{OrderId: "landed-on-retry"}, nil
+		},
+		func(cid string) (string, bool, error) {
+			findCIDs = append(findCIDs, cid)
+			return "", false, nil // every probe comes back clean and absent
+		},
+	)
+	id, err := p.placeResolved(kindMarketBuy, "SI", 2, 0)
+	if err != nil || id != "landed-on-retry" {
+		t.Fatalf("a placement that lands on a same-cid retry must be adopted: id=%q err=%v", id, err)
+	}
+	if placements != cidRetryRounds {
+		t.Fatalf("placements = %d, want %d (must succeed on the last round, not retry past it)", placements, cidRetryRounds)
+	}
+	allCIDs := append(append([]string{}, placeCIDs...), findCIDs...)
+	for _, cid := range allCIDs {
+		if cid != placeCIDs[0] {
+			t.Fatalf("every placement/probe must reuse the original client id %q, got %q", placeCIDs[0], cid)
+		}
+	}
+}
+
+// If every same-cid retry keeps coming back ambiguous but resolution DOES confirm absence
+// each time, placeResolved must give up after cidRetryRounds — not retry forever — and
+// report the ORIGINAL ambiguity, not a promoted definitive rejection.
+func TestPlacerExhaustsCidRetryRoundsWhenNeverResolved(t *testing.T) {
+	placements := 0
+	p := testPlacer(
+		func(string) (*orders.OrderState, error) {
+			placements++
+			return nil, status.Error(codes.DeadlineExceeded, "rpc timeout")
+		},
+		func(string) (string, bool, error) { return "", false, nil },
+	)
+	_, err := p.placeResolved(kindMarketBuy, "SI", 2, 0)
+	if !execengine.MaybeDelivered(err) {
+		t.Fatal("exhausting cidRetryRounds must stay ambiguous, not become a definitive rejection")
+	}
+	if placements != cidRetryRounds {
+		t.Fatalf("placements = %d, want %d", placements, cidRetryRounds)
 	}
 }
 

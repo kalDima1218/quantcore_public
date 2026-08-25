@@ -28,6 +28,17 @@ func ExecutedLots(st *orders.OrderState) int {
 	return int(math.Round(ParseDecimal(st.GetExecutedQuantity().GetValue())))
 }
 
+// InitialLots returns an order state's originally-requested quantity rounded to whole lots
+// (0 when the field is absent) — the size it was placed for, unlike ExecutedLots.
+func InitialLots(st *orders.OrderState) int {
+	return int(math.Round(ParseDecimal(st.GetInitialQuantity().GetValue())))
+}
+
+// SideMatches reports whether an order's side agrees with buy (true = SIDE_BUY).
+func SideMatches(st *orders.OrderState, buy bool) bool {
+	return st.GetOrder().GetSide() == sideOf(buy)
+}
+
 func PlaceOrder(client *Client, order *orders.Order) (*orders.OrderState, error) {
 	conn, ctx, cancel, err := client.dial(context.Background())
 	if err != nil {

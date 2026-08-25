@@ -52,6 +52,9 @@ const (
 	kindMarketSell
 )
 
+// buy reports the side a kind places on — the same mapping placer.place's own switch uses.
+func (k orderKind) buy() bool { return k == kindLimitBid || k == kindMarketBuy }
+
 const (
 	// ghostProbes / ghostProbeGap pace the client-id resolution after an ambiguous
 	// placement error: the order (if it was delivered) needs a moment to appear in the
@@ -60,6 +63,9 @@ const (
 	// to be an untracked ghost order.
 	ghostProbes   = 3
 	ghostProbeGap = time.Second
+	// cidRetryRounds bounds how many times placeResolved retries a still-unresolved
+	// ambiguous placement using the SAME client id before giving up — see placeResolved.
+	cidRetryRounds = 3
 )
 
 // placer wraps live order placement with client-order-id idempotency, closing the
@@ -85,7 +91,7 @@ type placer struct {
 
 	// RPC seams (production defaults target the finam package; tests inject).
 	place func(kind orderKind, symbol string, lots int, price float64, clientOrderID string) (*orders.OrderState, error)
-	find  func(clientOrderID string) (orderID string, found bool, err error)
+	find  func(clientOrderID, symbol string, buy bool, lots int) (orderID string, found bool, err error)
 	sleep func(time.Duration)
 	nowFn func() time.Time
 }
@@ -123,14 +129,33 @@ func newPlacer(c *finam.Client, logTag string) *placer {
 			return finam.PlaceMarketOrderSell(c, t, cid)
 		}
 	}
-	p.find = func(cid string) (string, bool, error) {
+	p.find = func(cid, symbol string, buy bool, lots int) (string, bool, error) {
 		st, found, err := finam.FindOrderByClientID(c, cid)
 		if err != nil || !found {
 			return "", found, err
 		}
+		if !matchesIntent(st, symbol, buy, lots) {
+			// The client id collided with an order that does NOT match what THIS call
+			// intended to place — trust nothing rather than silently adopting a stranger's
+			// order under our id; treat it exactly like "not found" so the caller keeps
+			// probing/retrying instead of reporting a false resolution.
+			o := st.GetOrder()
+			p.critical("client id %s resolved to an order that does NOT match the intended placement (want %s buy=%v x%d, got %s side=%v x%d) — treating as unresolved",
+				cid, symbol, buy, lots, o.GetSymbol(), o.GetSide(), finam.InitialLots(st))
+			return "", false, nil
+		}
 		return st.GetOrderId(), true, nil
 	}
 	return p
+}
+
+// matchesIntent reports whether an order found by client id actually is the one THIS
+// placement intended: same symbol, same side, same requested lots. A client_order_id
+// collision only proves the id matches — nothing stops it from resolving to an unrelated
+// order (a bug elsewhere, a corrupted response) unless the fields are checked too.
+func matchesIntent(st *orders.OrderState, symbol string, buy bool, lots int) bool {
+	o := st.GetOrder()
+	return o.GetSymbol() == symbol && finam.SideMatches(st, buy) && finam.InitialLots(st) == lots
 }
 
 // client returns the underlying Finam client for the non-placement RPCs (cancel/status).
@@ -155,11 +180,25 @@ func (p *placer) nextClientID() string {
 	return "q" + p.nonce + strconv.FormatInt(p.nowFn().Unix(), 36) + strconv.FormatUint(seq, 36)
 }
 
-// placeResolved issues one placement and, on an ambiguous transport error, tries to resolve
-// the order's fate by client id against the account's ACTIVE orders before reporting to the
-// engine: found there → "placed, here is its id"; absent → still unresolved, since GetOrders
-// excludes terminal orders (see trade/finam.GetOrders) and cannot distinguish "never placed"
-// from "placed and already settled" — the original ambiguous error propagates unchanged.
+// placeResolved issues a placement and, on an ambiguous transport error, tries to resolve
+// the order's fate — first by probing the account's ACTIVE orders for the SAME client id,
+// then, if that stays inconclusive, by RETRYING THE PLACEMENT ITSELF with that SAME id,
+// up to cidRetryRounds total rounds, rather than ever minting a fresh one.
+//
+// A same-cid retry can only land on one of two outcomes: the ORIGINAL order (the broker
+// already has it under this id and answers AlreadyExists — itself ambiguous, per
+// ambiguous(), and resolved by the very same probe), or a genuinely fresh placement (the
+// first attempt truly never reached the broker). It can never produce a second,
+// independently-tracked order beside the first. That is exactly what minting a NEW client
+// id on every retry used to risk: an ambiguous RPC failure whose order actually landed,
+// followed by an ordinary retry that placed a SECOND, real order under a different id —
+// crossing the spread twice for a hedge the caller asked for once, invisible to execengine
+// until reconcile (if it ever ran) caught the divergence.
+//
+// Exhausting every round still unresolved reports failure with the original client id's
+// ambiguity intact — the caller's own retry budget (execengine's HedgeRetries), if any, is
+// then free to mint a new id, but only after this function tried hard not to need one.
+//
 // A DEFINITIVE result — a genuine business rejection, classified by ambiguous() (the only
 // place in this package that knows gRPC codes) — is marked via execengine.NewDefinitiveReject
 // before it crosses into execengine, so the broker-neutral execengine.MaybeDelivered agrees
@@ -167,43 +206,54 @@ func (p *placer) nextClientID() string {
 // know gRPC itself.
 func (p *placer) placeResolved(kind orderKind, symbol string, lots int, price float64) (string, error) {
 	cid := p.nextClientID()
-	st, err := p.place(kind, symbol, lots, price, cid)
-	if err == nil {
-		return st.GetOrderId(), nil
-	}
-	if !ambiguous(err) {
-		return "", execengine.NewDefinitiveReject(err) // the broker answered: rejected, nothing rests
-	}
-	p.logf("place %s x%d failed in transport (%v) — the order MAY have reached the broker; resolving by client id %s", symbol, lots, err, cid)
-	sawAbsent := false
-	for probe := 0; probe < ghostProbes; probe++ {
-		p.sleep(ghostProbeGap) // give a delivered order a moment to appear in the account list
-		id, found, ferr := p.find(cid)
-		if ferr != nil {
-			continue // the account list is unreachable too — keep probing
+	var lastErr error
+	sawAbsent := false // true the moment ANY round's probing gets a clean "not on the active list" answer
+	for round := 0; round < cidRetryRounds; round++ {
+		st, err := p.place(kind, symbol, lots, price, cid)
+		if err == nil {
+			return st.GetOrderId(), nil
 		}
-		if found {
-			p.logf("client id %s resolved: order %s EXISTS at the broker — adopting it as a normal placement", cid, id)
-			return id, nil
+		if !ambiguous(err) {
+			return "", execengine.NewDefinitiveReject(err) // the broker answered: rejected, nothing rests
 		}
-		sawAbsent = true
+		lastErr = err
+		if round == 0 {
+			p.logf("place %s x%d failed in transport (%v) — the order MAY have reached the broker; resolving by client id %s", symbol, lots, err, cid)
+		} else {
+			p.logf("client id %s still ambiguous after retrying the placement (round %d/%d) — probing again", cid, round+1, cidRetryRounds)
+		}
+		for probe := 0; probe < ghostProbes; probe++ {
+			p.sleep(ghostProbeGap) // give a delivered order a moment to appear in the account list
+			id, found, ferr := p.find(cid, symbol, kind.buy(), lots)
+			if ferr != nil {
+				continue // the account list is unreachable too — keep probing
+			}
+			if found {
+				p.logf("client id %s resolved: order %s EXISTS at the broker — adopting it as a normal placement", cid, id)
+				return id, nil
+			}
+			sawAbsent = true
+		}
+		if round < cidRetryRounds-1 {
+			p.sleep(ghostProbeGap) // give the broker a beat before retrying the placement itself
+		}
 	}
 	if sawAbsent {
 		// Absence from the ACTIVE order list does NOT prove the order was never placed —
 		// GetOrders excludes terminal orders (see trade/finam.GetOrders), so an order that
-		// was placed and already filled or cancelled before this probe ran looks IDENTICAL
-		// to one that never existed. This stays classified as unknown/ambiguous — the
-		// original transport error propagates unchanged, never promoted to a definitive
-		// "confirmed not placed" — so the reject-retry ladder does not shrink-and-retry on
-		// it; reconcile is the net that catches a genuine fill-and-vanish ghost.
-		p.logf("client id %s resolved: absent from the account's ACTIVE orders (inconclusive — GetOrders excludes terminal orders) — reporting the original transport error", cid)
-		return "", err
+		// was placed and already filled or cancelled before a probe ran looks IDENTICAL to
+		// one that never existed. This stays classified as unknown/ambiguous — the original
+		// transport error propagates unchanged, never promoted to a definitive "confirmed
+		// not placed" — so the reject-retry ladder does not shrink-and-retry on it;
+		// reconcile is the net that catches a genuine fill-and-vanish ghost.
+		p.logf("client id %s still absent from the account's ACTIVE orders after %d rounds (inconclusive — GetOrders excludes terminal orders) — reporting the original transport error", cid, cidRetryRounds)
+		return "", lastErr
 	}
-	// Neither the placement nor the resolution could reach the broker: report failure —
-	// the engine's own machinery (backoff / hedge debt / reconcile) owns the wait. If a
-	// ghost did land, reconcile will surface it.
-	p.critical("client id %s UNRESOLVED (order list unreachable) — reporting the placement as failed; reconcile is the net if a ghost landed", cid)
-	return "", fmt.Errorf("placement unresolved (transport error and order list unreachable): %w", err)
+	// Neither the placements nor the resolution probes ever reached the broker across every
+	// round: report failure — the engine's own machinery (backoff / hedge debt / reconcile)
+	// owns the wait. If a ghost did land, reconcile will surface it.
+	p.critical("client id %s UNRESOLVED after %d rounds (order list unreachable) — reporting the placement as failed; reconcile is the net if a ghost landed", cid, cidRetryRounds)
+	return "", fmt.Errorf("placement unresolved after %d rounds (transport error and order list unreachable): %w", cidRetryRounds, lastErr)
 }
 
 // finamMaker places post-only (GOOD_TILL_CROSSING) limit orders through the live Finam

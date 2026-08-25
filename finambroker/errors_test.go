@@ -2,9 +2,12 @@ package finambroker
 
 import (
 	"errors"
+	"fmt"
 	"testing"
 
+	v1 "github.com/FinamWeb/finam-trade-api/go/grpc/tradeapi/v1"
 	"github.com/FinamWeb/finam-trade-api/go/grpc/tradeapi/v1/orders"
+	"google.golang.org/genproto/googleapis/type/decimal"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
@@ -50,5 +53,46 @@ func TestPlaceResolvedResolvesOnAlreadyExists(t *testing.T) {
 	id, err := p.placeResolved(kindLimitBid, "SI", 2, 100)
 	if err != nil || id != "existing1" {
 		t.Fatalf("AlreadyExists must resolve via the order list, got id=%q err=%v", id, err)
+	}
+}
+
+func testOrderState(symbol string, side v1.Side, lots int) *orders.OrderState {
+	return &orders.OrderState{
+		OrderId: "found1",
+		Order:   &orders.Order{Symbol: symbol, Side: side},
+		InitialQuantity: &decimal.Decimal{
+			Value: fmt.Sprintf("%d", lots),
+		},
+	}
+}
+
+// A client_order_id collision only proves the id matches — matchesIntent must also verify
+// symbol/side/lots agree with what THIS call intended to place before it is safe to adopt
+// the found order under our id (see placer.find's doc: trust nothing, treat a mismatch
+// exactly like "not found").
+func TestMatchesIntent(t *testing.T) {
+	cases := []struct {
+		name     string
+		symbol   string
+		side     v1.Side
+		lots     int
+		wantSym  string
+		wantBuy  bool
+		wantLots int
+		want     bool
+	}{
+		{"exact match buy", "SI", v1.Side_SIDE_BUY, 2, "SI", true, 2, true},
+		{"exact match sell", "UF", v1.Side_SIDE_SELL, 3, "UF", false, 3, true},
+		{"symbol mismatch", "SI", v1.Side_SIDE_BUY, 2, "UF", true, 2, false},
+		{"side mismatch", "SI", v1.Side_SIDE_BUY, 2, "SI", false, 2, false},
+		{"lots mismatch", "SI", v1.Side_SIDE_BUY, 2, "SI", true, 5, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			st := testOrderState(c.symbol, c.side, c.lots)
+			if got := matchesIntent(st, c.wantSym, c.wantBuy, c.wantLots); got != c.want {
+				t.Fatalf("matchesIntent(%q, buy=%v, %d) = %v, want %v", c.wantSym, c.wantBuy, c.wantLots, got, c.want)
+			}
+		})
 	}
 }
