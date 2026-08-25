@@ -361,12 +361,14 @@ func (h *engineHarness) halt() {
 	h.e.Halt("test")
 }
 
-// quotaSet выставляет остаток квоты установленного лимитера (для теста гейтинга).
+// quotaSet выставляет остаток квоты установленного лимитера (для теста гейтинга) —
+// имитирует ответ RefreshQuota: token снят ДО "RPC", now — после.
 func (h *engineHarness) quotaSet(remaining int, resetAt time.Time) {
 	if h.limiter == nil {
 		h.t.Fatal("quotaSet: лимитер не установлен (withLimiter)")
 	}
-	h.limiter.Set(remaining, resetAt)
+	token := h.limiter.Snapshot()
+	h.limiter.Set(remaining, resetAt, time.Now(), token)
 }
 
 // placeForeignLimit ставит лимитник НАПРЯМУЮ через клиент (минуя движок), так что
