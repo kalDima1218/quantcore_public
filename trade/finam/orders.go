@@ -91,7 +91,10 @@ func GetOrder(client *Client, orderID string) (*orders.OrderState, error) {
 	return orderState, nil
 }
 
-// GetOrders returns all orders currently known for the configured account.
+// GetOrders returns the account's ACTIVE orders — per Finam's API docs (Migration Guide),
+// this is NOT a full order history: a terminal order (filled, cancelled, rejected) can drop
+// off this list once it settles. Absence from the response proves "not currently active",
+// never "never existed" or "never filled" — see FindOrderByClientID.
 func GetOrders(client *Client) (*orders.OrdersResponse, error) {
 	conn, ctx, cancel, err := client.dial(context.Background())
 	if err != nil {
@@ -111,12 +114,15 @@ func GetOrders(client *Client) (*orders.OrdersResponse, error) {
 	return resp, nil
 }
 
-// FindOrderByClientID scans the account's order list for the order carrying the given
-// client_order_id (the API echoes it back inside OrderState.Order). It is the recovery
-// probe for the lost-placement-response race: a place RPC that died in transport may
-// still have delivered its order, and the client id — chosen BEFORE the RPC — is the only
-// handle that survives the lost response. found=false with a nil error is an
-// authoritative "the account does not list it".
+// FindOrderByClientID scans the account's ACTIVE order list (see GetOrders) for the order
+// carrying the given client_order_id (the API echoes it back inside OrderState.Order). It
+// is the recovery probe for the lost-placement-response race: a place RPC that died in
+// transport may still have delivered its order, and the client id — chosen BEFORE the RPC —
+// is the only handle that survives the lost response. found=false with a nil error means
+// only "not currently active" — it does NOT distinguish "never placed" from "placed, then
+// already filled or cancelled before this probe ran" (GetOrders excludes terminal orders).
+// Callers that need to shrink-and-retry on a confirmed-absent order need a stronger source
+// than this one.
 func FindOrderByClientID(client *Client, clientOrderID string) (*orders.OrderState, bool, error) {
 	if clientOrderID == "" {
 		return nil, false, fmt.Errorf("empty client order id")

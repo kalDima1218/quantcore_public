@@ -8,14 +8,18 @@ import (
 	"testing"
 	"time"
 
+	"QuantCore/strategies/execengine"
+
 	"github.com/FinamWeb/finam-trade-api/go/grpc/tradeapi/v1/orders"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
 
 // The placer closes the LOST-RESPONSE race: a placement whose RPC dies in transport is
-// resolved by client id against the account's order list before anything is reported to
-// the engine — "placed, here is its id" or "confirmed not placed", never a guess.
+// resolved by client id against the account's ACTIVE order list before anything is
+// reported to the engine — "placed, here is its id" when found, or the original ambiguous
+// error left unchanged when absent (GetOrders excludes terminal orders, so absence is
+// inconclusive, never a confirmed non-placement — see trade/finam.GetOrders).
 
 // testPlacer builds a placer with injected seams and a deterministic clock.
 func testPlacer(place func(cid string) (*orders.OrderState, error), find func(cid string) (string, bool, error)) *placer {
@@ -88,14 +92,37 @@ func TestPlacerAmbiguousErrorAdoptsDeliveredGhost(t *testing.T) {
 	}
 }
 
-func TestPlacerAmbiguousErrorConfirmedAbsentFails(t *testing.T) {
+func TestPlacerAmbiguousErrorAbsentFromActiveListFails(t *testing.T) {
 	rpcErr := status.Error(codes.Unavailable, "connection reset")
 	p := testPlacer(
 		func(string) (*orders.OrderState, error) { return nil, rpcErr },
-		func(string) (string, bool, error) { return "", false, nil }, // authoritative: not listed
+		func(string) (string, bool, error) { return "", false, nil }, // not in the ACTIVE list
 	)
 	if _, err := p.placeResolved(kindLimitAsk, "SI", 2, 101); !errors.Is(err, rpcErr) {
-		t.Fatalf("a confirmed-absent placement must fail with the original error, got %v", err)
+		t.Fatalf("absence from the active list must fail with the original error, got %v", err)
+	}
+}
+
+// A placement that timed out in transport but actually landed AND already filled (or was
+// cancelled) before the resolution probe ran is INDISTINGUISHABLE, from GetOrders alone,
+// from one that never reached the broker — GetOrders excludes terminal orders. The original
+// ambiguous error must still propagate, unpromoted to a definitive rejection: execengine's
+// MaybeDelivered must keep classifying it as ambiguous, so the reject-retry ladder does NOT
+// shrink-and-retry (which would double the position on top of the real fill).
+func TestPlacerTimeoutThenAlreadyExecutedGhostIsNotConfirmedAbsent(t *testing.T) {
+	rpcErr := status.Error(codes.DeadlineExceeded, "placement rpc timeout")
+	p := testPlacer(
+		func(string) (*orders.OrderState, error) { return nil, rpcErr },
+		// The order filled and left the active list before every probe ran — same
+		// observation GetOrders would report for "never placed".
+		func(string) (string, bool, error) { return "", false, nil },
+	)
+	_, err := p.placeResolved(kindMarketBuy, "SI", 3, 0)
+	if !errors.Is(err, rpcErr) {
+		t.Fatalf("must fail with the original error, got %v", err)
+	}
+	if !execengine.MaybeDelivered(err) {
+		t.Fatal("an order absent only from the ACTIVE list must stay ambiguous — promoting it to definitive would let the reject-retry ladder double the real fill")
 	}
 }
 

@@ -69,11 +69,14 @@ const (
 // ignored until reconcile flagged the divergence. Every order is therefore tagged with a
 // unique client_order_id chosen BEFORE the RPC (the one handle that survives a lost
 // response; the API echoes it back inside OrderState.Order). On an AMBIGUOUS transport
-// error the placer resolves the truth by scanning the account's orders for the tag:
-// found → the order exists and is returned as a normal success (the engine tracks it);
-// authoritatively absent → the placement genuinely failed and the error propagates.
-// Definitive business rejections (invalid args, permission, insufficient funds) skip the
-// scan — the broker answered, nothing was placed.
+// error the placer resolves what it can by scanning the account's ACTIVE orders for the
+// tag: found → the order exists and is returned as a normal success (the engine tracks
+// it); absent → still UNKNOWN, not confirmed-not-placed (GetOrders only lists active
+// orders — a same-second fill-and-vanish would look identical to "never placed", see
+// trade/finam.GetOrders), so the original ambiguous error propagates and the engine's own
+// reconcile machinery remains the net for that sliver. Definitive business rejections
+// (invalid args, permission, insufficient funds) skip the scan entirely — the broker
+// answered, nothing was placed.
 type placer struct {
 	c      *finam.Client
 	logTag string        // stamped on every log line — see NewMaker
@@ -146,9 +149,11 @@ func (p *placer) nextClientID() string {
 	return "q" + p.nonce + strconv.FormatInt(p.nowFn().Unix(), 36) + strconv.FormatUint(seq, 36)
 }
 
-// placeResolved issues one placement and, on an ambiguous transport error, resolves the
-// order's true fate by client id before reporting anything to the engine: the engine
-// must only ever see "placed, here is its id" or "confirmed not placed" — never a guess.
+// placeResolved issues one placement and, on an ambiguous transport error, tries to resolve
+// the order's fate by client id against the account's ACTIVE orders before reporting to the
+// engine: found there → "placed, here is its id"; absent → still unresolved, since GetOrders
+// excludes terminal orders (see trade/finam.GetOrders) and cannot distinguish "never placed"
+// from "placed and already settled" — the original ambiguous error propagates unchanged.
 // It shares execengine.MaybeDelivered with the reject-retry ladder (engine_clip.go/
 // engine_hedge.go) so both agree on what "ambiguous" means for the same broker error.
 func (p *placer) placeResolved(kind orderKind, symbol string, lots int, price float64) (string, error) {
@@ -175,10 +180,14 @@ func (p *placer) placeResolved(kind orderKind, symbol string, lots int, price fl
 		sawAbsent = true
 	}
 	if sawAbsent {
-		// The account's order list answered and does not carry the tag: not placed. (A
-		// same-second fill-and-vanish could in principle evade a list that omits done
-		// orders — reconcile remains the net for that sliver.)
-		p.logf("client id %s resolved: absent from the account's orders — treating the placement as failed", cid)
+		// Absence from the ACTIVE order list does NOT prove the order was never placed —
+		// GetOrders excludes terminal orders (see trade/finam.GetOrders), so an order that
+		// was placed and already filled or cancelled before this probe ran looks IDENTICAL
+		// to one that never existed. This stays classified as unknown/ambiguous — the
+		// original transport error propagates unchanged, never promoted to a definitive
+		// "confirmed not placed" — so the reject-retry ladder does not shrink-and-retry on
+		// it; reconcile is the net that catches a genuine fill-and-vanish ghost.
+		p.logf("client id %s resolved: absent from the account's ACTIVE orders (inconclusive — GetOrders excludes terminal orders) — reporting the original transport error", cid)
 		return "", err
 	}
 	// Neither the placement nor the resolution could reach the broker: report failure —
