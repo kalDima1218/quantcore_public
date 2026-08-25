@@ -25,6 +25,16 @@ func TestAmbiguousClassification(t *testing.T) {
 			t.Fatalf("%v is a definitive broker answer — no resolution", c)
 		}
 	}
+	// An UNRECOGNIZED gRPC code — not in either explicit list above — must default to
+	// ambiguous, not definitive: a code this package has never seen carries no evidence the
+	// broker evaluated and rejected the order, so guessing "definitive" would let the
+	// reject-retry ladder shrink-and-retry (or the taker retry loop mint a new placement) on
+	// top of an order that may already rest at the broker. Definitive is the narrow,
+	// explicit allowlist above; everything else — known-but-unlisted or genuinely unknown —
+	// defaults to ambiguous.
+	if !ambiguous(status.Error(codes.Unimplemented, "x")) {
+		t.Fatal("an unrecognized gRPC code must default to ambiguous, not definitive")
+	}
 	// Plain (non-gRPC) errors map to codes.Unknown: fate unknown → resolve.
 	if !ambiguous(errors.New("dial tcp: broken pipe")) {
 		t.Fatal("a non-gRPC transport error leaves the fate unknown")
