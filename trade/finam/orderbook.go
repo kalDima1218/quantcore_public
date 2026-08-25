@@ -352,7 +352,7 @@ func (w *dropWarner) note() {
 	w.dropped++
 	w.total++
 	if now := time.Now(); w.lastWarn.IsZero() || now.Sub(w.lastWarn) >= dropWarnInterval {
-		mlog.Printf("[%s] Warning: %s consumer lagging — dropped %d oldest queued snapshot(s), keeping the newest",
+		mlog.Warn("[%s] %s consumer lagging — dropped %d oldest queued snapshot(s), keeping the newest",
 			w.symbol, w.what, w.dropped)
 		w.dropped = 0
 		w.lastWarn = now
@@ -464,7 +464,7 @@ func runLatestTradesStream(client *Client, symbol string, out chan<- *marketdata
 			select {
 			case out <- tr:
 			default:
-				mlog.Printf("[%s] Warning: latest-trades channel full, dropping update", symbol)
+				mlog.Warn("[%s] latest-trades channel full, dropping update", symbol)
 			}
 		}
 	}

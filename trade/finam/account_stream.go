@@ -49,7 +49,7 @@ func runAccountStream(client *Client, out chan<- *accounts.GetAccountResponse) e
 		select {
 		case out <- resp:
 		default:
-			mlog.Printf("[account] Warning: channel full, dropping update")
+			mlog.Warn("[account] channel full, dropping update")
 		}
 	}
 }

@@ -224,7 +224,7 @@ func (e *Engine) Reconcile(legAActual, legBActual int) {
 	}
 	if !e.recovery.suspect {
 		e.recovery.suspect = true
-		e.logf("reconcile WARNING: legA have=%d want=%d, legB have=%d want=%d — possibly an in-flight fill; new clips suspended until the next reconcile confirms",
+		e.warn("reconcile: legA have=%d want=%d, legB have=%d want=%d — possibly an in-flight fill; new clips suspended until the next reconcile confirms",
 			legAActual, pos, legBActual, wantB)
 		return
 	}
