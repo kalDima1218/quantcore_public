@@ -1,85 +1,33 @@
-# QuantCore
+# QuantCore — execution infrastructure (extracted subset)
 
-Многопоточная система обработки биржевых данных на Go. Включает сбор данных в реальном времени через gRPC, движок бэктеста с оптимизацией параметров и подключаемый интерфейс торговых стратегий.
+This is a scrubbed, self-contained extract of four packages from a private trading
+monorepo, for external code review only. It is **not** the full project and there is
+no `package main` here — nothing runs standalone, but `go build ./...`, `go vet ./...`
+and `go test ./...` all pass.
 
-## Архитектура
+## What's here
 
-```
-QuantCore/
-├── backtest/
-│   ├── strategy/         # Интерфейс DecisionMaker + пример-заглушка
-│   ├── backtest.go       # Движок бэктеста с учётом финансирования и клиринга
-│   └── optimizer.go      # Параллельная оптимизация параметров (thread pool)
-├── dataframe/            # Колоночный DataFrame с типизированными Series
-├── series/               # Float / String / Time / Duration series с векторными операциями
-├── io/                   # Чтение/запись CSV
-├── grpcclient/           # Менеджер gRPC-соединений со state machine
-├── trade/finam/          # Клиент брокера Finam (авторизация, ордера, стакан, счета)
-├── listener.go           # Сбор рыночных данных в реальном времени в CSV
-├── backtester.go         # Точки входа для бэктеста и оптимизации
-└── main.go               # CLI-флаги
-```
+- `strategies/execengine` — the order-execution engine: passive limit orders, taker
+  hedging on fill, re-peg, cancels, reconcile-after-reconnect, an impaired/halted mode
+  for broker trouble. It knows nothing about trading signals — it takes an `Intent`
+  (direction + size for two legs, "LegA"/"LegB") from a caller and executes it.
+- `trade/finam` — a client for a real broker's public gRPC trading API (auth, orders,
+  account/margin, order book streaming, market-schedule polling).
+- `grpcclient` — a small generic gRPC connection wrapper (reconnect/backoff) used by
+  the above.
+- `modlog` — a trivial per-module file+stderr logger.
 
-## Компоненты
+## What's deliberately NOT here
 
-### DataFrame и Series
+The actual trading strategy (signal construction, entry/exit thresholds, position
+sizing, which instruments are paired) lives in separate packages that are excluded
+from this extract on purpose. The only thing safe to say about it here is that it's a
+two-leg (pair) strategy — a "dated" leg and a "perp" leg, referred to generically as
+LegA/LegB throughout this code, same as `execengine`'s own naming. Real instrument
+tickers, spread economics, and account identifiers have been replaced with generic
+placeholders (`LEGA@RTSX`/`LEGB@RTSX`) in test fixtures and comments.
 
-Собственная колоночная структура данных, аналогичная pandas DataFrame. Поддерживает типизированные серии (float64, string, time.Time, time.Duration) с векторными арифметическими операциями.
+## History
 
-- Скользящее среднее за O(n) через скользящее окно
-- Вычисление цены исполнения по уровням стакана
-- Переиспользование заранее выделенной строки в горячих циклах для снижения нагрузки на GC
-- Развертки операциий: `Add(s1, s2, s3)` → `(s1 + s2) + s3` и вычисление
-
-### Движок бэктеста
-
-Симулирует исполнение стратегии на исторических тиковых данных. Учитывает:
-- Спред (bid-ask) на каждую сделку
-- Ежедневные ставки финансирования, загружаемые из CSV
-- Клиринговые сборы биржи за период удержания позиции
-
-### Оптимизатор параметров
-
-Полный перебор сетки параметров стратегии через пул воркеров. Поддерживает оценку на нескольких датасетах одновременно
-
-### Интерфейс стратегии
-
-Реализуйте `DecisionMaker` для подключения собственной стратегии:
-
-```go
-type DecisionMaker interface {
-    GetDecision(state map[string]any) Decision
-    SetPosition(position int, price float64)
-    GetPositionMax() int
-    GetOrderSize() int
-    SaveLots()
-    LoadLots() error
-}
-```
-
-`state` содержит рыночные данные текущего бара. `Decision.Decision` принимает значения `1` (покупка), `-1` (продажа) или `0` (удержание)
-
-### Слушатель рыночных данных
-
-Подписывается на обновления стакана через gRPC-стриминг и записывает данные в CSV:
-
-- Режим лучший bid/ask: одна строка в секунду на символ
-- Режим полного стакана: глубина 10 уровней, буферизация по временным меткам с отдельной flusher-горутиной — гарантирует запись только полных секунд (корректно обрабатывает обрыв соединения в подмножестве горутин)
-- Обнаружение устаревших данных: пропускает запись если последнее обновление превышает порог
-- Отдельные горутины на каждый символ с независимым отслеживанием торговой сессии
-
-### gRPC-клиент
-
-Менеджер соединений с адаптивным state machine:
-
-- Состояния: `Ready` → обслуживает запросы; `Idle` → вызывает `Connect()`; `TransientFailure` → ждёт повтора gRPC; `Shutdown` → завершает работу
-- Двухуровневая сигнализация готовности (`atomic.Bool` + `chan struct{}`) для блокирующего и неблокирующего получения соединения
-- Keepalive-пинги каждые 30 секунд для поддержания долгоживущих соединений
-- Автоматическое переподключение стрима стакана при ошибке
-
-### Клиент брокера Finam
-
-- JWT-авторизация с фоновой monitor-горутиной, обновляющей токен каждые 10 минут
-- `sync.Once` барьер инициализации с таймаутом 30 секунд на первое подключение
-- Параллельное выставление ордеров: обе ноги (buy и sell) отправляются одновременно в отдельных горутинах
-- Автоматическое переподключение gRPC-стрима с задержкой 1 секунда
+This is a single orphan commit with no parent — it does not carry the monorepo's
+commit history (which does touch the strategy packages), by design.

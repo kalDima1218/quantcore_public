@@ -1,0 +1,194 @@
+package execengine
+
+import (
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/FinamWeb/finam-trade-api/go/grpc/tradeapi/v1/orders"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
+)
+
+// The placer closes the LOST-RESPONSE race: a placement whose RPC dies in transport is
+// resolved by client id against the account's order list before anything is reported to
+// the engine — "placed, here is its id" or "confirmed not placed", never a guess.
+
+// testPlacer builds a placer with injected seams and a deterministic clock.
+func testPlacer(place func(cid string) (*orders.OrderState, error), find func(cid string) (string, bool, error)) *placer {
+	p := &placer{
+		nonce: "abc123",
+		sleep: func(time.Duration) {},
+		nowFn: func() time.Time { return time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC) },
+	}
+	p.place = func(_ orderKind, _ string, _ int, _ float64, cid string) (*orders.OrderState, error) {
+		return place(cid)
+	}
+	p.find = func(cid string) (string, bool, error) { return find(cid) }
+	return p
+}
+
+func TestPlacerSuccessSkipsResolution(t *testing.T) {
+	finds := 0
+	p := testPlacer(
+		func(cid string) (*orders.OrderState, error) {
+			if cid == "" {
+				t.Fatal("every placement must carry a client id")
+			}
+			return &orders.OrderState{OrderId: "ord1"}, nil
+		},
+		func(string) (string, bool, error) { finds++; return "", false, nil },
+	)
+	id, err := p.placeResolved(kindLimitBid, "SI", 2, 100)
+	if err != nil || id != "ord1" {
+		t.Fatalf("id=%q err=%v, want ord1/nil", id, err)
+	}
+	if finds != 0 {
+		t.Fatal("a clean success must not consult the order list")
+	}
+}
+
+func TestPlacerDefinitiveRejectionSkipsResolution(t *testing.T) {
+	finds := 0
+	rej := status.Error(codes.InvalidArgument, "price out of band")
+	p := testPlacer(
+		func(string) (*orders.OrderState, error) { return nil, rej },
+		func(string) (string, bool, error) { finds++; return "", false, nil },
+	)
+	if _, err := p.placeResolved(kindLimitBid, "SI", 2, 100); !errors.Is(err, rej) {
+		t.Fatalf("a business rejection must propagate as-is, got %v", err)
+	}
+	if finds != 0 {
+		t.Fatal("a definitive broker answer needs no resolution — nothing was placed")
+	}
+}
+
+// The core of the race: the RPC timed out but the order DID land. The placer must find it
+// by client id and hand it to the engine as a normal, tracked placement.
+func TestPlacerAmbiguousErrorAdoptsDeliveredGhost(t *testing.T) {
+	var placedCID string
+	p := testPlacer(
+		func(cid string) (*orders.OrderState, error) {
+			placedCID = cid
+			return nil, status.Error(codes.DeadlineExceeded, "rpc timeout")
+		},
+		func(cid string) (string, bool, error) {
+			if cid != placedCID {
+				t.Fatalf("resolution must probe the placed client id, got %q want %q", cid, placedCID)
+			}
+			return "ghost7", true, nil
+		},
+	)
+	id, err := p.placeResolved(kindMarketBuy, "UF", 2, 0)
+	if err != nil || id != "ghost7" {
+		t.Fatalf("the delivered ghost must be adopted: id=%q err=%v", id, err)
+	}
+}
+
+func TestPlacerAmbiguousErrorConfirmedAbsentFails(t *testing.T) {
+	rpcErr := status.Error(codes.Unavailable, "connection reset")
+	p := testPlacer(
+		func(string) (*orders.OrderState, error) { return nil, rpcErr },
+		func(string) (string, bool, error) { return "", false, nil }, // authoritative: not listed
+	)
+	if _, err := p.placeResolved(kindLimitAsk, "SI", 2, 101); !errors.Is(err, rpcErr) {
+		t.Fatalf("a confirmed-absent placement must fail with the original error, got %v", err)
+	}
+}
+
+// The order list answering only on the LAST probe still resolves (the ghost needed a
+// moment to appear); an order list that never answers reports a distinct unresolved
+// failure so the log trail shows the ambiguity.
+func TestPlacerResolutionRetriesAndUnresolvedIsLoud(t *testing.T) {
+	calls := 0
+	p := testPlacer(
+		func(string) (*orders.OrderState, error) { return nil, status.Error(codes.Unavailable, "down") },
+		func(string) (string, bool, error) {
+			calls++
+			if calls < ghostProbes {
+				return "", false, errors.New("orders list down too")
+			}
+			return "late9", true, nil
+		},
+	)
+	id, err := p.placeResolved(kindMarketSell, "UF", 1, 0)
+	if err != nil || id != "late9" {
+		t.Fatalf("a late-appearing ghost must still be adopted: id=%q err=%v", id, err)
+	}
+
+	calls = 0
+	p2 := testPlacer(
+		func(string) (*orders.OrderState, error) { return nil, status.Error(codes.Unavailable, "down") },
+		func(string) (string, bool, error) { calls++; return "", false, errors.New("orders list down too") },
+	)
+	_, err = p2.placeResolved(kindMarketSell, "UF", 1, 0)
+	if err == nil {
+		t.Fatal("an unresolvable placement must fail")
+	}
+	if calls != ghostProbes {
+		t.Fatalf("resolution must exhaust its probes before giving up, got %d want %d", calls, ghostProbes)
+	}
+}
+
+func TestPlacerClientIDsUniqueAndWithinCap(t *testing.T) {
+	p := testPlacer(nil, nil)
+	seen := map[string]bool{}
+	for i := 0; i < 1000; i++ {
+		cid := p.nextClientID()
+		if len(cid) > 20 {
+			t.Fatalf("client id %q exceeds the API's 20-char cap", cid)
+		}
+		if seen[cid] {
+			t.Fatalf("client id %q minted twice", cid)
+		}
+		seen[cid] = true
+	}
+}
+
+// The transport-error classifier: only errors that leave the order's fate unknown may
+// trigger resolution; broker verdicts must not.
+func TestMaybeDeliveredClassification(t *testing.T) {
+	for _, c := range []codes.Code{codes.Unavailable, codes.DeadlineExceeded, codes.Canceled, codes.Unknown, codes.Internal, codes.DataLoss, codes.Aborted} {
+		if !maybeDelivered(status.Error(c, "x")) {
+			t.Fatalf("%v must count as possibly delivered", c)
+		}
+	}
+	for _, c := range []codes.Code{codes.InvalidArgument, codes.FailedPrecondition, codes.PermissionDenied, codes.NotFound, codes.ResourceExhausted, codes.Unauthenticated, codes.AlreadyExists, codes.OutOfRange} {
+		if maybeDelivered(status.Error(c, "x")) {
+			t.Fatalf("%v is a definitive broker answer — no resolution", c)
+		}
+	}
+	// Plain (non-gRPC) errors map to codes.Unknown: fate unknown → resolve.
+	if !maybeDelivered(errors.New("dial tcp: broken pipe")) {
+		t.Fatal("a non-gRPC transport error leaves the fate unknown")
+	}
+}
+
+// TestPlacerNextClientIDConcurrentlyUnique proves nextClientID is safe to call from
+// multiple goroutines at once: taker-only mode mints both legs' client id off the same
+// *placer while racing their first attempt, so a plain p.seq++ (a non-atomic
+// read-modify-write) risks a torn increment or a collision.
+func TestPlacerNextClientIDConcurrentlyUnique(t *testing.T) {
+	p := testPlacer(nil, nil)
+	const n = 100
+	ids := make([]string, n)
+	var wg sync.WaitGroup
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		i := i
+		go func() {
+			defer wg.Done()
+			ids[i] = p.nextClientID()
+		}()
+	}
+	wg.Wait()
+
+	seen := map[string]bool{}
+	for _, id := range ids {
+		if seen[id] {
+			t.Fatalf("client id %q minted twice under concurrent calls", id)
+		}
+		seen[id] = true
+	}
+}

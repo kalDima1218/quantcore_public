@@ -11,13 +11,10 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/connectivity"
 	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
-var (
-	ErrNotConnected = errors.New("not connected")
-	ErrClosed       = errors.New("client closed")
-)
+var ErrClosed = errors.New("client closed")
 
 type Client struct {
 	conn *grpc.ClientConn
@@ -33,20 +30,31 @@ type Client struct {
 	mu        sync.Mutex
 }
 
-func NewClient(addr string) (*Client, error) {
-	creds := credentials.NewTLS(&tls.Config{
+// NewClient dials addr over TLS. extraOpts are appended after the base dial
+// options, letting a caller tune a specific connection (e.g. larger HTTP/2 flow-
+// control windows for a stream-only connection) without affecting others; passing
+// none reproduces the previous behaviour exactly.
+func NewClient(addr string, extraOpts ...grpc.DialOption) (*Client, error) {
+	return newClient(addr, credentials.NewTLS(&tls.Config{
 		InsecureSkipVerify: false,
-	})
+	}), extraOpts...)
+}
 
-	kaParams := keepalive.ClientParameters{
-		Time:                30 * time.Second,
-		Timeout:             10 * time.Second,
-		PermitWithoutStream: true,
-	}
+// NewClientInsecure dials addr WITHOUT TLS. It exists solely for pointing the
+// bot at a local broker simulator (brokersim) on loopback; production Finam
+// endpoints must go through NewClient. extraOpts behave as in NewClient.
+func NewClientInsecure(addr string, extraOpts ...grpc.DialOption) (*Client, error) {
+	return newClient(addr, insecure.NewCredentials(), extraOpts...)
+}
 
+func newClient(addr string, creds credentials.TransportCredentials, extraOpts ...grpc.DialOption) (*Client, error) {
+	// No gRPC client keepalive: Finam's gateway does not ACK client keepalive
+	// pings, so they only surface as spurious "keepalive ping failed to receive
+	// ACK" errors that tear down otherwise-fine connections. Finam closes
+	// idle/expired connections on its own; a server-initiated close makes the
+	// active stream's Recv() return an error, which already drives reconnection.
 	opts := []grpc.DialOption{
 		grpc.WithTransportCredentials(creds),
-		grpc.WithKeepaliveParams(kaParams),
 		grpc.WithDefaultServiceConfig(`{
             "methodConfig": [{
                 "name": [{"service": ""}],
@@ -54,6 +62,7 @@ func NewClient(addr string) (*Client, error) {
             }]
         }`),
 	}
+	opts = append(opts, extraOpts...)
 
 	conn, err := grpc.NewClient(addr, opts...)
 	if err != nil {
@@ -70,14 +79,14 @@ func NewClient(addr string) (*Client, error) {
 
 	conn.Connect()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	err = client.waitForState(ctx, connectivity.Ready)
 	cancel()
 
 	if err != nil {
-		err := conn.Close()
-		if err != nil {
-			return nil, err
+		errConn := conn.Close()
+		if errConn != nil {
+			return nil, errConn
 		}
 		return nil, err
 	}
@@ -171,28 +180,6 @@ func (c *Client) GetConn(ctx context.Context) (*grpc.ClientConn, error) {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-}
-
-func (c *Client) MustGetConn() *grpc.ClientConn {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	conn, err := c.GetConn(ctx)
-	if err != nil {
-		panic("grpc connection not ready: " + err.Error())
-	}
-	return conn
-}
-
-func (c *Client) IsReady() bool {
-	return c.ready.Load()
-}
-
-func (c *Client) WaitReady(timeout time.Duration) error {
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
-	_, err := c.GetConn(ctx)
-	return err
 }
 
 func (c *Client) Close() error {
