@@ -206,7 +206,7 @@ func (p *placer) nextClientID() string {
 // know gRPC itself.
 func (p *placer) placeResolved(kind orderKind, symbol string, lots int, price float64) (string, error) {
 	cid := p.nextClientID()
-	var lastErr error
+	var firstErr error // reported to the caller — round 0's error is the one that actually explains the incident; a later round's is usually just AlreadyExists (OUR OWN retry colliding with itself), which reads like our bug rather than the real transport failure that started this
 	sawAbsent := false // true the moment ANY round's probing gets a clean "not on the active list" answer
 	for round := 0; round < cidRetryRounds; round++ {
 		st, err := p.place(kind, symbol, lots, price, cid)
@@ -216,8 +216,8 @@ func (p *placer) placeResolved(kind orderKind, symbol string, lots int, price fl
 		if !ambiguous(err) {
 			return "", execengine.NewDefinitiveReject(err) // the broker answered: rejected, nothing rests
 		}
-		lastErr = err
 		if round == 0 {
+			firstErr = err
 			p.logf("place %s x%d failed in transport (%v) — the order MAY have reached the broker; resolving by client id %s", symbol, lots, err, cid)
 		} else {
 			p.logf("client id %s still ambiguous after retrying the placement (round %d/%d) — probing again", cid, round+1, cidRetryRounds)
@@ -247,13 +247,13 @@ func (p *placer) placeResolved(kind orderKind, symbol string, lots int, price fl
 		// not placed" — so the reject-retry ladder does not shrink-and-retry on it;
 		// reconcile is the net that catches a genuine fill-and-vanish ghost.
 		p.logf("client id %s still absent from the account's ACTIVE orders after %d rounds (inconclusive — GetOrders excludes terminal orders) — reporting the original transport error", cid, cidRetryRounds)
-		return "", lastErr
+		return "", firstErr
 	}
 	// Neither the placements nor the resolution probes ever reached the broker across every
 	// round: report failure — the engine's own machinery (backoff / hedge debt / reconcile)
 	// owns the wait. If a ghost did land, reconcile will surface it.
 	p.critical("client id %s UNRESOLVED after %d rounds (order list unreachable) — reporting the placement as failed; reconcile is the net if a ghost landed", cid, cidRetryRounds)
-	return "", fmt.Errorf("placement unresolved after %d rounds (transport error and order list unreachable): %w", cidRetryRounds, lastErr)
+	return "", fmt.Errorf("placement unresolved after %d rounds (transport error and order list unreachable): %w", cidRetryRounds, firstErr)
 }
 
 // finamMaker places post-only (GOOD_TILL_CROSSING) limit orders through the live Finam
