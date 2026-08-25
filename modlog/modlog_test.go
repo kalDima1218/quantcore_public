@@ -17,13 +17,13 @@ func TestLoggerCriticalCarriesLevelAsData(t *testing.T) {
 	var buf bytes.Buffer
 	l := newTestLogger(&buf)
 
-	l.Critical("stray fill of %d lots on %s", 3, "SiU6")
+	l.Critical("stray fill of %d lots on %s", 3, "LEGA@RTSX")
 
 	got := buf.String()
 	if !strings.Contains(got, "[CRITICAL]") {
 		t.Fatalf("output %q does not carry a CRITICAL level tag", got)
 	}
-	if !strings.Contains(got, "stray fill of 3 lots on SiU6") {
+	if !strings.Contains(got, "stray fill of 3 lots on LEGA@RTSX") {
 		t.Fatalf("output %q does not contain the formatted message", got)
 	}
 }
