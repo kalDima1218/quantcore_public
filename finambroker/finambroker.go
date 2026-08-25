@@ -311,8 +311,8 @@ const (
 // implementation (or a test double) can be wired up here without this adapter needing to
 // know its concrete type.
 type QuotaUpdater interface {
-	Snapshot() int64
-	Set(remaining int, resetAt, now time.Time, token int64)
+	Snapshot() execengine.QuotaToken
+	Set(remaining int, resetAt, now time.Time, token execengine.QuotaToken)
 }
 
 // RefreshQuota polls Finam's placeOrder usage quota and feeds it to lim until ctx ends,

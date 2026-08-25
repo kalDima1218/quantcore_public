@@ -17,7 +17,7 @@ func TestQuotaLimiterLegacyPermissiveUntilSet(t *testing.T) {
 	if s := q.String(); s != "n/a" {
 		t.Fatalf("String()=%q, want n/a до Set", s)
 	}
-	q.Set(23, now.Add(time.Minute), now, 0) // 23 >= 2+20 -> пускать
+	q.Set(23, now.Add(time.Minute), now, QuotaToken{}) // 23 >= 2+20 -> пускать
 	if ok, _ := q.Allow(now, 2); !ok {
 		t.Fatal("23 >= 2+20 -> должен пускать")
 	}
@@ -90,7 +90,7 @@ func TestQuotaLimiterSetOverridesBootstrap(t *testing.T) {
 	q := NewQuotaLimiterBudget(20, 200, time.Minute)
 	now := time.Now()
 	q.Allow(now, 2) // бутстрап -> 200
-	q.Set(25, now.Add(30*time.Second), now, 0)
+	q.Set(25, now.Add(30*time.Second), now, q.Snapshot())
 	if r, _ := q.Remaining(); r != 25 {
 		t.Fatalf("Set должен переопределить бутстрап: remaining=%d, want 25", r)
 	}
@@ -140,7 +140,7 @@ func TestLimiterDenialBacksOffUntilReset(t *testing.T) {
 func TestQuotaLimiterKeepsMarginInReserve(t *testing.T) {
 	q := NewQuotaLimiter(2)
 	reset := openHour.Add(time.Minute)
-	q.Set(4, reset, openHour, 0)
+	q.Set(4, reset, openHour, QuotaToken{})
 
 	if ok, _ := q.Allow(openHour, 2); !ok {
 		t.Fatal("4 remaining with margin 2 must allow a 2-op burst")
@@ -159,7 +159,7 @@ func TestQuotaLimiterKeepsMarginInReserve(t *testing.T) {
 // Spend — the actual placement RPC — decrements, and Remaining tracks the local view.
 func TestQuotaLimiterAllowChecksAndSpendDecrements(t *testing.T) {
 	q := NewQuotaLimiter(2)
-	q.Set(10, openHour.Add(time.Minute), openHour, 0)
+	q.Set(10, openHour.Add(time.Minute), openHour, QuotaToken{})
 
 	q.Allow(openHour, 2) // granted but never placed
 	if rem, known := q.Remaining(); !known || rem != 10 {
@@ -210,7 +210,7 @@ func TestQuotaLimiterConcurrentSetAndAllow(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 1000; i++ {
-			q.Set(200, openHour.Add(time.Duration(i)*time.Millisecond), openHour.Add(-time.Second), 0)
+			q.Set(200, openHour.Add(time.Duration(i)*time.Millisecond), openHour.Add(-time.Second), QuotaToken{})
 		}
 	}()
 	go func() {
@@ -228,11 +228,11 @@ func TestQuotaLimiterConcurrentSetAndAllow(t *testing.T) {
 // accounting glitch) must deny discretionary opens — the reserve is for hedges/cancels.
 func TestQuotaLimiterLowAndNegativeBudgetsDeny(t *testing.T) {
 	q := NewQuotaLimiter(5)
-	q.Set(5, openHour.Add(time.Minute), openHour, 0) // exactly the margin left
+	q.Set(5, openHour.Add(time.Minute), openHour, QuotaToken{}) // exactly the margin left
 	if ok, _ := q.Allow(openHour, 1); ok {
 		t.Fatal("a budget equal to the margin must deny")
 	}
-	q.Set(-3, openHour.Add(time.Minute), openHour, 0) // corrupt/negative budget
+	q.Set(-3, openHour.Add(time.Minute), openHour, QuotaToken{}) // corrupt/negative budget
 	if ok, _ := q.Allow(openHour, 1); ok {
 		t.Fatal("a negative budget must deny")
 	}
@@ -308,7 +308,7 @@ func TestQuotaLimiterUngatedHedgeSpendAsFirstRPCOfNewWindow(t *testing.T) {
 // Spend must keep debiting the broker-reported remaining exactly as before.
 func TestQuotaLimiterLegacySpendUnaffectedByRollover(t *testing.T) {
 	q := NewQuotaLimiter(5)
-	q.Set(10, openHour.Add(time.Minute), openHour, 0)
+	q.Set(10, openHour.Add(time.Minute), openHour, QuotaToken{})
 	q.Spend(openHour.Add(time.Hour), 3) // far past any "window" — legacy has none
 	if rem, _ := q.Remaining(); rem != 7 {
 		t.Fatalf("remaining=%d, want 7 (legacy Spend must not gain a rollover side effect)", rem)
@@ -387,6 +387,64 @@ func TestQuotaLimiterSetIgnoresStaleOutOfOrderResponse(t *testing.T) {
 	q.Set(195, resetAt, openHour, tokenOld) // poll #1's response arrives LATE, out of order
 	if rem, _ := q.Remaining(); rem != 185 {
 		t.Fatalf("remaining=%d, want 185 (a late, out-of-order response must not override a newer one)", rem)
+	}
+}
+
+// The usage-metrics RPC can take up to quotaRPCTimeout in flight. If the fail-safe window
+// rolls over LOCALLY (via refreshWindow, from an ordinary Spend/Allow on the engine
+// goroutine) WHILE that RPC is still in flight, the response it eventually carries — still
+// describing the OLD window, snapshotted BEFORE the rollover — must be rejected outright,
+// not adjusted: totalSpent-based arithmetic alone cannot tell the epochs apart (a rollover
+// with zero spends before it leaves totalSpent unchanged), which is exactly why the token
+// carries an epoch. Applying a superseded-epoch response anyway would walk q.resetAt
+// BACKWARDS; the next Allow/Spend would then see an "elapsed" resetAt and full-reset the
+// budget, erasing every op the new window already spent.
+func TestQuotaLimiterSetIgnoresResponseOlderThanLocallyRolledWindow(t *testing.T) {
+	q := NewQuotaLimiterBudget(20, 200, time.Minute)
+	q.Allow(openHour, 1) // bootstrap window 1: remaining=200, resetAt=openHour+60s
+
+	token := q.Snapshot() // RefreshQuota snapshots before issuing the usage-metrics RPC
+
+	// While that RPC is in flight, window 1 rolls over locally (self-heal), independent of
+	// any Set — zero spends happened in window 1, so totalSpent alone could not tell this
+	// rollover apart from the one still tracked by token above; only the epoch bump can.
+	q.Spend(openHour.Add(65*time.Second), 5) // remaining=200-5=195, resetAt=openHour+125s (window 2)
+
+	// The RPC's answer finally arrives, still describing window 1 as of the token snapshot:
+	// its own resetAt (openHour+70s) has not yet passed relative to the "now" it captured
+	// (openHour+65.5s), so the existing staleness guard alone would not reject it.
+	q.Set(150, openHour.Add(70*time.Second), openHour.Add(65500*time.Millisecond), token)
+
+	if rem, ok := q.Remaining(); !ok || rem != 195 {
+		t.Fatalf("remaining=%d known=%v, want 195 (a response for an already-superseded window must not overwrite the rolled-over one)", rem, ok)
+	}
+
+	// The corrupted symptom without the fix: the next Allow, past the wrongly-adopted
+	// resetAt=70s, sees it as elapsed and full-resets the budget to 200 — erasing the 5
+	// ops window 2 already spent.
+	if ok, _ := q.Allow(openHour.Add(71*time.Second), 1); !ok {
+		t.Fatal("window 2 must still be gating, not full-reset")
+	}
+	if rem, _ := q.Remaining(); rem != 195 {
+		t.Fatalf("remaining=%d after a later Allow, want 195 (window 2 must not have been erased/re-rolled)", rem)
+	}
+}
+
+// A rollover with ZERO spends before it is the sharpest version of the bug: totalSpent does
+// not move at all across the boundary, so a token-ordering check keyed on spent alone cannot
+// distinguish "predates this rollover" from "predates the previous one" — only a dedicated
+// epoch counter can.
+func TestQuotaLimiterSetRejectsStaleTokenAcrossZeroSpendRollover(t *testing.T) {
+	q := NewQuotaLimiterBudget(20, 200, time.Minute)
+	token := q.Snapshot() // captured before ANY Allow/Spend: spent=0, epoch=0
+
+	q.Allow(openHour, 1)                     // bootstrap rollover: epoch 0->1, remaining=200
+	q.Spend(openHour.Add(65*time.Second), 0) // a second rollover, again with zero spend: epoch 1->2
+
+	q.Set(150, openHour.Add(10*time.Second), openHour.Add(5*time.Second), token)
+
+	if rem, _ := q.Remaining(); rem != 200 {
+		t.Fatalf("remaining=%d, want 200 (a token from before either rollover must be rejected, not just applied and clamped)", rem)
 	}
 }
 

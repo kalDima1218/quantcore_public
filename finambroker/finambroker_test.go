@@ -254,12 +254,12 @@ func TestPlacerLogLinesCarryLogTag(t *testing.T) {
 type setOnlyQuota struct {
 	remaining int
 	resetAt   time.Time
-	token     int64
+	token     execengine.QuotaToken
 }
 
-func (s *setOnlyQuota) Snapshot() int64 { return s.token }
+func (s *setOnlyQuota) Snapshot() execengine.QuotaToken { return s.token }
 
-func (s *setOnlyQuota) Set(remaining int, resetAt, _ time.Time, token int64) {
+func (s *setOnlyQuota) Set(remaining int, resetAt, _ time.Time, token execengine.QuotaToken) {
 	s.remaining, s.resetAt, s.token = remaining, resetAt, token
 }
 
