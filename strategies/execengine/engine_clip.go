@@ -408,7 +408,7 @@ func (e *Engine) openClip(in Intent, lots int, ts time.Time) (opened, retryable 
 			// and shrinking it on a margin reject would silently under-open a position the
 			// signal asked for a specific size of. A rejected exit has no such ambiguity —
 			// getting SOME of it off is strictly better than none.
-			return false, in.IsClose && !maybeDelivered(err)
+			return false, in.IsClose && !MaybeDelivered(err)
 		}
 		var deadline time.Time
 		if e.cfg.FillTimeout > 0 {
@@ -422,7 +422,7 @@ func (e *Engine) openClip(in Intent, lots int, ts time.Time) (opened, retryable 
 		e.backoffUntil = ts.Add(e.placeBackoff())
 		// See the ExecSoloMakerLegB branch above: only a CLOSING clip's first placement is
 		// ladder-eligible.
-		return false, in.IsClose && !maybeDelivered(err)
+		return false, in.IsClose && !MaybeDelivered(err)
 	}
 	// Single-passive: LegB is never rested — it is taker-hedged when LegA fills (the first-fill
 	// path retires the empty LegB id → 0 → crosses the full leg). LegB keeps its direction
@@ -554,7 +554,7 @@ func (e *Engine) placeLeg(lo *legOrder, sym string, lots int) error {
 	}
 	// One placeOrder RPC spent whether or not it succeeded — the broker meters requests,
 	// not accepted orders.
-	e.limiter.Spend(1)
+	e.limiter.Spend(e.now, 1)
 	if err != nil {
 		return err
 	}

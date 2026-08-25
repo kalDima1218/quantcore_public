@@ -1,6 +1,6 @@
 # QuantCore — execution infrastructure (extracted subset)
 
-This is a scrubbed, self-contained extract of four packages from a private trading
+This is a scrubbed, self-contained extract of five packages from a private trading
 monorepo, for external code review only. It is **not** the full project and there is
 no `package main` here — nothing runs standalone, but `go build ./...`, `go vet ./...`
 and `go test ./...` all pass.
@@ -10,7 +10,11 @@ and `go test ./...` all pass.
 - `strategies/execengine` — the order-execution engine: passive limit orders, taker
   hedging on fill, re-peg, cancels, reconcile-after-reconnect, an impaired/halted mode
   for broker trouble. It knows nothing about trading signals — it takes an `Intent`
-  (direction + size for two legs, "LegA"/"LegB") from a caller and executes it.
+  (direction + size for two legs, "LegA"/"LegB") from a caller and executes it. It also
+  knows nothing about Finam: the interfaces it exposes (`Maker`/`Taker`/`Limiter`) are
+  broker-neutral, and it does not import `trade/finam`.
+- `finambroker` — adapts the Finam gRPC trade API to execengine's ports. The only
+  package in this extract that imports both `execengine` and `trade/finam`.
 - `trade/finam` — a client for a real broker's public gRPC trading API (auth, orders,
   account/margin, order book streaming, market-schedule polling).
 - `grpcclient` — a small generic gRPC connection wrapper (reconnect/backoff) used by

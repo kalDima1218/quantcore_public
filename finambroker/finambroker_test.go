@@ -1,7 +1,9 @@
-package execengine
+package finambroker
 
 import (
+	"bytes"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -146,25 +148,6 @@ func TestPlacerClientIDsUniqueAndWithinCap(t *testing.T) {
 	}
 }
 
-// The transport-error classifier: only errors that leave the order's fate unknown may
-// trigger resolution; broker verdicts must not.
-func TestMaybeDeliveredClassification(t *testing.T) {
-	for _, c := range []codes.Code{codes.Unavailable, codes.DeadlineExceeded, codes.Canceled, codes.Unknown, codes.Internal, codes.DataLoss, codes.Aborted} {
-		if !maybeDelivered(status.Error(c, "x")) {
-			t.Fatalf("%v must count as possibly delivered", c)
-		}
-	}
-	for _, c := range []codes.Code{codes.InvalidArgument, codes.FailedPrecondition, codes.PermissionDenied, codes.NotFound, codes.ResourceExhausted, codes.Unauthenticated, codes.AlreadyExists, codes.OutOfRange} {
-		if maybeDelivered(status.Error(c, "x")) {
-			t.Fatalf("%v is a definitive broker answer — no resolution", c)
-		}
-	}
-	// Plain (non-gRPC) errors map to codes.Unknown: fate unknown → resolve.
-	if !maybeDelivered(errors.New("dial tcp: broken pipe")) {
-		t.Fatal("a non-gRPC transport error leaves the fate unknown")
-	}
-}
-
 // TestPlacerNextClientIDConcurrentlyUnique proves nextClientID is safe to call from
 // multiple goroutines at once: taker-only mode mints both legs' client id off the same
 // *placer while racing their first attempt, so a plain p.seq++ (a non-atomic
@@ -192,3 +175,45 @@ func TestPlacerNextClientIDConcurrentlyUnique(t *testing.T) {
 		seen[id] = true
 	}
 }
+
+// placeResolved's log lines must carry the adapter's logTag in the actual log output —
+// the bug this package split fixed: a bare mlog.Printf with no access to
+// EngineConfig.LogTag made ambiguous-placement and CRITICAL-unresolved lines
+// indistinguishable between two strategies sharing execengine.log.
+func TestPlacerLogLinesCarryLogTag(t *testing.T) {
+	var buf bytes.Buffer
+	orig := mlog.Writer()
+	mlog.SetOutput(&buf)
+	t.Cleanup(func() { mlog.SetOutput(orig) })
+
+	p := testPlacer(
+		func(string) (*orders.OrderState, error) { return nil, status.Error(codes.Unavailable, "down") },
+		func(string) (string, bool, error) { return "", false, errors.New("orders list down too") },
+	)
+	p.logTag = "[basis_ema]"
+	if _, err := p.placeResolved(kindLimitBid, "SI", 2, 100); err == nil {
+		t.Fatal("setup: expected the unresolved-placement error path")
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "[execengine][basis_ema]") {
+		t.Fatalf("log output missing the strategy tag, got:\n%s", out)
+	}
+	if !strings.Contains(out, "CRITICAL") {
+		t.Fatalf("log output missing the CRITICAL unresolved line, got:\n%s", out)
+	}
+}
+
+// setOnlyQuota implements ONLY Set — not execengine.Limiter's Allow/Spend — to prove
+// RefreshQuota is wired against the narrow QuotaUpdater surface, not the concrete
+// execengine.QuotaLimiter type or the full Limiter interface.
+type setOnlyQuota struct {
+	remaining int
+	resetAt   time.Time
+}
+
+func (s *setOnlyQuota) Set(remaining int, resetAt time.Time) {
+	s.remaining, s.resetAt = remaining, resetAt
+}
+
+var _ QuotaUpdater = (*setOnlyQuota)(nil)

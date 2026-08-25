@@ -1,6 +1,6 @@
 package brokersim_test
 
-// e2e-тесты сима: НАСТОЯЩИЙ клиент trade/finam (и placer из execengine)
+// e2e-тесты сима: НАСТОЯЩИЙ клиент trade/finam (и placer из finambroker)
 // направляется на brokersim через QUANTCORE_FINAM_ADDR — проверяется вся
 // цепочка grpcclient → trade/finam → сим, включая сценарии инцидентов
 // (потерянный ответ постановки, реплей сделок при реконнекте, кросс книги).
@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"QuantCore/brokersim"
+	"QuantCore/finambroker"
 	"QuantCore/strategies/execengine"
 	"QuantCore/trade/finam"
 )
@@ -182,7 +183,7 @@ func TestPostOnlyRejectedByExchange(t *testing.T) {
 	}
 	waitFor(t, "exchange reject", func() bool {
 		got, err := finam.GetOrder(client, st.GetOrderId())
-		return err == nil && execengine.IsDeadStatus(got.GetStatus()) && finam.ExecutedLots(got) == 0
+		return err == nil && finambroker.IsDeadStatus(got.GetStatus()) && finam.ExecutedLots(got) == 0
 	})
 }
 
@@ -203,7 +204,7 @@ func TestMarketOrderPartialLiquidity(t *testing.T) {
 	}
 	waitFor(t, "partial fill + exchange kill", func() bool {
 		got, err := finam.GetOrder(client, st.GetOrderId())
-		return err == nil && execengine.IsDeadStatus(got.GetStatus()) && finam.ExecutedLots(got) == 4
+		return err == nil && finambroker.IsDeadStatus(got.GetStatus()) && finam.ExecutedLots(got) == 4
 	})
 	pos, ok, err := finam.GetPosition(client, testSymbol)
 	if err != nil || !ok || pos.Quantity != 4 {
@@ -222,7 +223,7 @@ func TestLostPlaceResponseRecovery(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	maker := execengine.NewFinamMaker(client)
+	maker := finambroker.NewMaker(client, "")
 	orderID, err := maker.PlaceBid(testSymbol, 1, 100)
 	if err != nil {
 		t.Fatalf("PlaceBid should have adopted the ghost order, got error: %v", err)
@@ -248,7 +249,7 @@ func TestCleanRejectIsNotRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	maker := execengine.NewFinamMaker(client)
+	maker := finambroker.NewMaker(client, "")
 	if _, err := maker.PlaceBid(testSymbol, 1, 100); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("want InvalidArgument, got %v", err)
 	}
@@ -463,7 +464,7 @@ func TestErrorFaultDefaultCode(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	maker := execengine.NewFinamMaker(client)
+	maker := finambroker.NewMaker(client, "")
 	if _, err := maker.PlaceBid(testSymbol, 1, 100); status.Code(err) != codes.InvalidArgument {
 		t.Fatalf("want default InvalidArgument, got %v", err)
 	}

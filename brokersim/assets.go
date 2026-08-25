@@ -139,7 +139,7 @@ func (svc *assetsService) OptionsChain(ctx context.Context, req *assets.OptionsC
 
 // metricsService реализует UsageMetricsService: квота постановки ордеров с
 // именем "OrdersService.placeOrder" — ровно тем, которое опрашивает
-// execengine.RefreshQuota.
+// finambroker.RefreshQuota.
 type metricsService struct {
 	usage_metrics.UnimplementedUsageMetricsServiceServer
 	s *Sim

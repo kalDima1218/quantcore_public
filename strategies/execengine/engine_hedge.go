@@ -284,9 +284,9 @@ func (e *Engine) takerRetryPlain(symbol string, buy bool, lots int, from int) bo
 }
 
 // shrinkTakerChase tries to place lots of symbol/buy, and on a DEFINITIVE reject
-// (maybeDelivered==false) shrinks by RejectRetryLotStep and tries again, accumulating
+// (MaybeDelivered==false) shrinks by RejectRetryLotStep and tries again, accumulating
 // every partial placement, down to RejectRetryMinLots (floor 1 if unset). Returns the
-// amount still unplaced (0 = fully placed). An ambiguous failure (maybeDelivered==true)
+// amount still unplaced (0 = fully placed). An ambiguous failure (MaybeDelivered==true)
 // stops the ladder immediately without shrinking — the order may already rest at the
 // broker, and guessing smaller on top of that uncertainty risks a double placement; the
 // caller's ordinary same-size attempts loop picks up the rest instead.
@@ -308,7 +308,7 @@ func (e *Engine) shrinkTakerChase(symbol string, buy bool, lots int) int {
 			}
 			continue
 		}
-		if maybeDelivered(err) {
+		if MaybeDelivered(err) {
 			return lots
 		}
 		e.logf("taker %s (buy=%v) rejected at %d lots — retrying smaller at %d", symbol, buy, size, size-e.cfg.RejectRetryLotStep)
@@ -345,7 +345,7 @@ func (e *Engine) placeTakerRPC(symbol string, buy bool, lots int) (string, error
 func (e *Engine) commitTakerPlacement(symbol string, buy bool, lots int, id string, err error) bool {
 	// Every attempt is one placeOrder RPC against the broker's quota, hedges included —
 	// book it so the limiter's budget view doesn't wait on the next refresh poll.
-	e.limiter.Spend(1)
+	e.limiter.Spend(e.now, 1)
 	if err != nil {
 		e.logf("taker %s (buy=%v x%d) attempt failed: %v", symbol, buy, lots, err)
 		return false

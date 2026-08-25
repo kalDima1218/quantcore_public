@@ -11,7 +11,7 @@ import (
 type noLimit struct{}
 
 func (noLimit) Allow(time.Time, int) (bool, time.Time) { return true, time.Time{} }
-func (noLimit) Spend(int)                              {}
+func (noLimit) Spend(time.Time, int)                   {}
 
 const (
 	// DefaultPlaceOrderBudget is Finam's documented per-minute placeOrder quota. It is
@@ -107,9 +107,14 @@ func (q *QuotaLimiter) Allow(now time.Time, ops int) (bool, time.Time) {
 
 // Spend books ops placement RPCs the engine actually issued against the budget. Failed
 // attempts count too — the broker metered the request whether or not the order stuck.
-func (q *QuotaLimiter) Spend(ops int) {
+// It rolls the bootstrap window over (same as Allow) BEFORE debiting: Spend is also the
+// ungated taker-hedge path, which never calls Allow first, so a hedge landing as the
+// first RPC after a window boundary must still debit the FRESH window — otherwise a
+// later Allow's own rollover would silently reset remaining and forget this spend.
+func (q *QuotaLimiter) Spend(now time.Time, ops int) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
+	q.refreshWindow(now)              // fail-safe: lazily restore the budget when the window rolls over
 	if q.known || q.windowLimit > 0 { // track in both real and bootstrap modes
 		q.remaining -= ops
 	}

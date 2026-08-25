@@ -33,7 +33,10 @@ type Taker interface {
 // instead of waiting on the next broker refresh.
 type Limiter interface {
 	Allow(now time.Time, ops int) (ok bool, retryAt time.Time)
-	Spend(ops int)
+	// Spend books ops placement RPCs actually issued at now — including UNGATED spends
+	// (a taker hedge never checked by Allow first) — so an implementation with a
+	// self-managed window can roll it over before debiting rather than after.
+	Spend(now time.Time, ops int)
 }
 
 // FillSink receives the engine's authoritative own-execution accounting, exactly once per

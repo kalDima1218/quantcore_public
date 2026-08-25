@@ -34,6 +34,7 @@ import (
 	"google.golang.org/grpc/codes"
 
 	"QuantCore/brokersim"
+	"QuantCore/finambroker"
 	"QuantCore/strategies/execengine"
 	"QuantCore/trade/finam"
 )
@@ -215,7 +216,7 @@ func newEngineHarness(t *testing.T, cfg brokersim.Config, opts ...harnessOpt) *e
 	}
 
 	dm := &scriptDecider{maxPos: b.maxPos}
-	e := execengine.NewEngine(b.ec, execengine.NewFinamMaker(client), execengine.NewFinamTaker(client), dm)
+	e := execengine.NewEngine(b.ec, finambroker.NewMaker(client, ""), finambroker.NewTaker(client, ""), dm)
 	e.SetFillSink(dm)
 
 	h := &engineHarness{t: t, srv: srv, client: client, e: e, dm: dm, stop: make(chan struct{}), done: make(chan struct{})}
@@ -233,7 +234,7 @@ func newEngineHarness(t *testing.T, cfg brokersim.Config, opts ...harnessOpt) *e
 		if b.refreshQuota {
 			ctx, cancel := context.WithCancel(context.Background())
 			go func() { <-h.stop; cancel() }()
-			go execengine.RefreshQuota(ctx, client, h.limiter)
+			go finambroker.RefreshQuota(ctx, client, h.limiter)
 		}
 	}
 	go h.run()
@@ -309,7 +310,7 @@ func (h *engineHarness) run() {
 		case o, ok := <-orderStates:
 			if ok && o != nil {
 				h.mu.Lock()
-				h.e.OnOrderStatus(o.GetOrderId(), execengine.IsDeadStatus(o.GetStatus()))
+				h.e.OnOrderStatus(o.GetOrderId(), finambroker.IsDeadStatus(o.GetStatus()))
 				h.mu.Unlock()
 			}
 		case now := <-tick.C:

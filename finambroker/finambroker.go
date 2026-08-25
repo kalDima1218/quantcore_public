@@ -1,4 +1,8 @@
-package execengine
+// Package finambroker adapts the Finam gRPC trade API to execengine's broker-neutral
+// ports (Maker/Taker/Limiter). This is the ONLY place in the trading path that imports
+// both QuantCore/strategies/execengine and QuantCore/trade/finam — execengine itself
+// knows nothing about Finam, so it can build and test without the Finam SDK at all.
+package finambroker
 
 import (
 	"context"
@@ -11,19 +15,32 @@ import (
 	"time"
 
 	"github.com/FinamWeb/finam-trade-api/go/grpc/tradeapi/v1/orders"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
+	"QuantCore/modlog"
+	"QuantCore/strategies/execengine"
 	"QuantCore/trade/finam"
 )
 
-// NewFinamMaker builds a Maker backed by live Finam GOOD_TILL_CROSSING limit orders.
-// Placements are idempotent against the lost-response race — see placer.
-func NewFinamMaker(c *finam.Client) Maker { return finamMaker{p: newPlacer(c)} }
+// mlog shares execengine's own log (logs/execengine.log): these messages — ghost-order
+// resolution, ambiguous-placement CRITICALs — are execengine diagnostics that happen to
+// live in this adapter package, and an operator reading the engine's log wants them in
+// the same stream, not split across files.
+var mlog = modlog.For("execengine")
 
-// NewFinamTaker builds a Taker backed by live Finam market orders. Placements are
-// idempotent against the lost-response race — see placer.
-func NewFinamTaker(c *finam.Client) Taker { return finamTaker{p: newPlacer(c)} }
+// NewMaker builds a Maker backed by live Finam GOOD_TILL_CROSSING limit orders. logTag
+// (e.g. "[basis_ema]") is stamped on every log line this adapter emits, matching
+// execengine.EngineConfig.LogTag, so two strategies sharing execengine.log stay
+// distinguishable — pass "" for untagged. Placements are idempotent against the
+// lost-response race — see placer.
+func NewMaker(c *finam.Client, logTag string) execengine.Maker {
+	return finamMaker{p: newPlacer(c, logTag)}
+}
+
+// NewTaker builds a Taker backed by live Finam market orders. See NewMaker for logTag.
+// Placements are idempotent against the lost-response race — see placer.
+func NewTaker(c *finam.Client, logTag string) execengine.Taker {
+	return finamTaker{p: newPlacer(c, logTag)}
+}
 
 // orderKind selects which of the four placement RPCs a placer call issues.
 type orderKind int
@@ -58,9 +75,10 @@ const (
 // Definitive business rejections (invalid args, permission, insufficient funds) skip the
 // scan — the broker answered, nothing was placed.
 type placer struct {
-	c     *finam.Client
-	nonce string        // per-placer random tag baked into every client id: uniqueness across processes and restarts
-	seq   atomic.Uint64 // per-placer counter: uniqueness within the process; taker-only mints both legs' id concurrently off this counter
+	c      *finam.Client
+	logTag string        // stamped on every log line — see NewMaker
+	nonce  string        // per-placer random tag baked into every client id: uniqueness across processes and restarts
+	seq    atomic.Uint64 // per-placer counter: uniqueness within the process; taker-only mints both legs' id concurrently off this counter
 
 	// RPC seams (production defaults target the finam package; tests inject).
 	place func(kind orderKind, symbol string, lots int, price float64, clientOrderID string) (*orders.OrderState, error)
@@ -69,12 +87,19 @@ type placer struct {
 	nowFn func() time.Time
 }
 
-func newPlacer(c *finam.Client) *placer {
+// logf writes one adapter log line tagged with logTag, mirroring execengine.Engine.logf
+// so the two share the exact same "[execengine]<tag> " prefix convention in the shared log.
+func (p *placer) logf(format string, args ...any) {
+	mlog.Printf("[execengine]"+p.logTag+" "+format, args...)
+}
+
+func newPlacer(c *finam.Client, logTag string) *placer {
 	p := &placer{
-		c:     c,
-		nonce: randNonce(),
-		sleep: time.Sleep,
-		nowFn: time.Now,
+		c:      c,
+		logTag: logTag,
+		nonce:  randNonce(),
+		sleep:  time.Sleep,
+		nowFn:  time.Now,
 	}
 	p.place = func(kind orderKind, symbol string, lots int, price float64, cid string) (*orders.OrderState, error) {
 		t := finam.Ticker{Symbol: symbol, Vol: lots}
@@ -121,31 +146,21 @@ func (p *placer) nextClientID() string {
 	return "q" + p.nonce + strconv.FormatInt(p.nowFn().Unix(), 36) + strconv.FormatUint(seq, 36)
 }
 
-// maybeDelivered reports whether a placement error leaves the order's fate UNKNOWN: the
-// request may have reached the broker even though the response never made it back.
-// Definitive business rejections mean the broker answered and nothing rests.
-func maybeDelivered(err error) bool {
-	switch status.Code(err) {
-	case codes.Unavailable, codes.DeadlineExceeded, codes.Canceled,
-		codes.Unknown, codes.Internal, codes.DataLoss, codes.Aborted:
-		return true
-	}
-	return false
-}
-
 // placeResolved issues one placement and, on an ambiguous transport error, resolves the
 // order's true fate by client id before reporting anything to the engine: the engine
 // must only ever see "placed, here is its id" or "confirmed not placed" — never a guess.
+// It shares execengine.MaybeDelivered with the reject-retry ladder (engine_clip.go/
+// engine_hedge.go) so both agree on what "ambiguous" means for the same broker error.
 func (p *placer) placeResolved(kind orderKind, symbol string, lots int, price float64) (string, error) {
 	cid := p.nextClientID()
 	st, err := p.place(kind, symbol, lots, price, cid)
 	if err == nil {
 		return st.GetOrderId(), nil
 	}
-	if !maybeDelivered(err) {
+	if !execengine.MaybeDelivered(err) {
 		return "", err // the broker answered: rejected, nothing rests
 	}
-	mlog.Printf("[execengine] place %s x%d failed in transport (%v) — the order MAY have reached the broker; resolving by client id %s", symbol, lots, err, cid)
+	p.logf("place %s x%d failed in transport (%v) — the order MAY have reached the broker; resolving by client id %s", symbol, lots, err, cid)
 	sawAbsent := false
 	for probe := 0; probe < ghostProbes; probe++ {
 		p.sleep(ghostProbeGap) // give a delivered order a moment to appear in the account list
@@ -154,7 +169,7 @@ func (p *placer) placeResolved(kind orderKind, symbol string, lots int, price fl
 			continue // the account list is unreachable too — keep probing
 		}
 		if found {
-			mlog.Printf("[execengine] client id %s resolved: order %s EXISTS at the broker — adopting it as a normal placement", cid, id)
+			p.logf("client id %s resolved: order %s EXISTS at the broker — adopting it as a normal placement", cid, id)
 			return id, nil
 		}
 		sawAbsent = true
@@ -163,18 +178,18 @@ func (p *placer) placeResolved(kind orderKind, symbol string, lots int, price fl
 		// The account's order list answered and does not carry the tag: not placed. (A
 		// same-second fill-and-vanish could in principle evade a list that omits done
 		// orders — reconcile remains the net for that sliver.)
-		mlog.Printf("[execengine] client id %s resolved: absent from the account's orders — treating the placement as failed", cid)
+		p.logf("client id %s resolved: absent from the account's orders — treating the placement as failed", cid)
 		return "", err
 	}
 	// Neither the placement nor the resolution could reach the broker: report failure —
 	// the engine's own machinery (backoff / hedge debt / reconcile) owns the wait. If a
 	// ghost did land, reconcile will surface it.
-	mlog.Printf("[execengine] CRITICAL: client id %s UNRESOLVED (order list unreachable) — reporting the placement as failed; reconcile is the net if a ghost landed", cid)
+	p.logf("CRITICAL: client id %s UNRESOLVED (order list unreachable) — reporting the placement as failed; reconcile is the net if a ghost landed", cid)
 	return "", fmt.Errorf("placement unresolved (transport error and order list unreachable): %w", err)
 }
 
 // finamMaker places post-only (GOOD_TILL_CROSSING) limit orders through the live Finam
-// API, satisfying Maker.
+// API, satisfying execengine.Maker.
 type finamMaker struct{ p *placer }
 
 func (m finamMaker) PlaceBid(symbol string, lots int, price float64) (string, error) {
@@ -221,7 +236,7 @@ func (m finamMaker) Status(orderID string) (int, bool, error) {
 	return finam.ExecutedLots(st), terminalOrderStatus(st.GetStatus()), nil
 }
 
-// finamTaker crosses the spread with market orders, satisfying Taker.
+// finamTaker crosses the spread with market orders, satisfying execengine.Taker.
 type finamTaker struct{ p *placer }
 
 func (t finamTaker) Buy(symbol string, lots int) (string, error) {
@@ -235,7 +250,7 @@ func (t finamTaker) Sell(symbol string, lots int) (string, error) {
 // IsDeadStatus reports whether an order status is terminal WITHOUT a fill — the exchange
 // rejected, cancelled or expired the order, so a resting clip order at this status is
 // gone. FILLED is excluded (handled by the fill stream). It is the live runners' shared
-// filter for feeding Engine.OnOrderStatus.
+// filter for feeding execengine.Engine.OnOrderStatus.
 func IsDeadStatus(s orders.OrderStatus) bool {
 	switch s {
 	case orders.OrderStatus_ORDER_STATUS_CANCELED,
@@ -253,7 +268,7 @@ func IsDeadStatus(s orders.OrderStatus) bool {
 // e.Reconcile — the shared body of the runners' periodic reconcile pass. On a fetch
 // failure nothing is reconciled and the returned error names the failing leg; the
 // caller logs it with its own prefix and simply skips this pass.
-func ReconcileFromBroker(e *Engine, client *finam.Client, legA, legB string) error {
+func ReconcileFromBroker(e *execengine.Engine, client *finam.Client, legA, legB string) error {
 	a, _, err := finam.GetPosition(client, legA)
 	if err != nil {
 		return fmt.Errorf("%s position fetch failed: %w", legA, err)
@@ -266,35 +281,26 @@ func ReconcileFromBroker(e *Engine, client *finam.Client, legA, legB string) err
 	return nil
 }
 
-// TradeDedup remembers account-trade ids so a fill re-delivered by a stream reconnect
-// is folded only once. Process-lifetime, like Engine.own: dropping an id early would
-// risk double-counting a late re-delivery.
-type TradeDedup map[string]struct{}
-
-// Seen reports whether tid was already recorded, recording it otherwise. An empty id
-// (no dedup key) is never treated as a duplicate.
-func (d TradeDedup) Seen(tid string) bool {
-	if tid == "" {
-		return false
-	}
-	if _, dup := d[tid]; dup {
-		return true
-	}
-	d[tid] = struct{}{}
-	return false
-}
-
 const (
 	placeOrderQuota = "OrdersService.placeOrder" // usage-metrics name of the order-placement quota
 	quotaRefresh    = 5 * time.Second            // how often to re-poll the remaining budget
 	quotaRPCTimeout = 2 * time.Second            // bound on each usage-metrics RPC
 )
 
+// QuotaUpdater is the narrow surface RefreshQuota needs from a rate limiter: feed it the
+// broker's latest remaining budget. Deliberately NOT execengine.QuotaLimiter — RefreshQuota
+// only needs to Set numbers, not the limiter's Allow/Spend policy, so any Limiter
+// implementation (or a test double) can be wired up here without this adapter needing to
+// know its concrete type.
+type QuotaUpdater interface {
+	Set(remaining int, resetAt time.Time)
+}
+
 // RefreshQuota polls Finam's placeOrder usage quota and feeds it to lim until ctx ends,
 // so the engine can gate order bursts on the real remaining budget instead of guessing.
 // It polls once up front, before the first tick, so the first quotes are already gated.
 // Run it on its own goroutine; both live runners share it.
-func RefreshQuota(ctx context.Context, client *finam.Client, lim *QuotaLimiter) {
+func RefreshQuota(ctx context.Context, client *finam.Client, lim QuotaUpdater) {
 	poll := func() {
 		cctx, cancel := context.WithTimeout(ctx, quotaRPCTimeout)
 		defer cancel()

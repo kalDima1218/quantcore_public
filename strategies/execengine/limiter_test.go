@@ -21,7 +21,7 @@ func TestQuotaLimiterLegacyPermissiveUntilSet(t *testing.T) {
 	if ok, _ := q.Allow(now, 2); !ok {
 		t.Fatal("23 >= 2+20 -> должен пускать")
 	}
-	q.Spend(2) // 23 -> 21
+	q.Spend(now, 2) // 23 -> 21
 	if ok, _ := q.Allow(now, 2); ok {
 		t.Fatal("21 < 2+20 -> должен отказать (резерв margin)")
 	}
@@ -40,7 +40,7 @@ func TestQuotaLimiterBootstrapGatesWithoutRefresh(t *testing.T) {
 		if !ok {
 			break
 		}
-		q.Spend(2)
+		q.Spend(now, 2)
 		opens++
 		if opens > 1000 {
 			t.Fatal("бутстрап-лимитер НЕ гейтит опены — fail-open (баг не починен)")
@@ -55,7 +55,7 @@ func TestQuotaLimiterBootstrapGatesWithoutRefresh(t *testing.T) {
 		t.Fatalf("остаток %d < margin 20 — резерв под хедж не удержан", rem)
 	}
 	// Хеджи (Spend без Allow) всё ещё проходят по зарезервированному бюджету.
-	q.Spend(20)
+	q.Spend(now, 20)
 	if r, _ := q.Remaining(); r != rem-20 {
 		t.Fatalf("Spend хеджа не списался: %d -> %d", rem, r)
 	}
@@ -72,7 +72,7 @@ func TestQuotaLimiterBootstrapSelfResetsWindow(t *testing.T) {
 		if !ok {
 			break
 		}
-		q.Spend(2)
+		q.Spend(now, 2)
 	}
 	if ok, _ := q.Allow(now, 2); ok {
 		t.Fatal("после выжигания опены должны быть заблокированы")
@@ -97,8 +97,8 @@ func TestQuotaLimiterSetOverridesBootstrap(t *testing.T) {
 	if ok, _ := q.Allow(now, 2); !ok {
 		t.Fatal("25 >= 2+20 -> пускать")
 	}
-	q.Spend(4) // 25 -> 21
-	q.Spend(2) // 21 -> 19
+	q.Spend(now, 4) // 25 -> 21
+	q.Spend(now, 2) // 21 -> 19
 	if ok, _ := q.Allow(now, 2); ok {
 		t.Fatal("19 < 2+20 -> отказать")
 	}
@@ -141,7 +141,7 @@ func TestQuotaLimiterKeepsMarginInReserve(t *testing.T) {
 	if ok, _ := q.Allow(openHour, 2); !ok {
 		t.Fatal("4 remaining with margin 2 must allow a 2-op burst")
 	}
-	q.Spend(2) // the granted burst is actually placed
+	q.Spend(openHour, 2) // the granted burst is actually placed
 	ok, retryAt := q.Allow(openHour, 1)
 	if ok {
 		t.Fatal("2 remaining with margin 2 must deny: the reserve is for hedges/cancels only")
@@ -161,7 +161,7 @@ func TestQuotaLimiterAllowChecksAndSpendDecrements(t *testing.T) {
 	if rem, known := q.Remaining(); !known || rem != 10 {
 		t.Fatalf("Allow alone must not decrement, got remaining=%d known=%v", rem, known)
 	}
-	q.Spend(3) // e.g. two maker legs plus an ungated taker hedge
+	q.Spend(openHour, 3) // e.g. two maker legs plus an ungated taker hedge
 	if rem, _ := q.Remaining(); rem != 7 {
 		t.Fatalf("Spend(3) must land remaining at 7, got %d", rem)
 	}
@@ -213,7 +213,7 @@ func TestQuotaLimiterConcurrentSetAndAllow(t *testing.T) {
 		defer wg.Done()
 		for i := 0; i < 1000; i++ {
 			q.Allow(openHour, 2)
-			q.Spend(1)
+			q.Spend(openHour, 1)
 			q.Remaining()
 		}
 	}()
@@ -231,5 +231,99 @@ func TestQuotaLimiterLowAndNegativeBudgetsDeny(t *testing.T) {
 	q.Set(-3, openHour.Add(time.Minute)) // corrupt/negative budget
 	if ok, _ := q.Allow(openHour, 1); ok {
 		t.Fatal("a negative budget must deny")
+	}
+}
+
+// Spend must roll the bootstrap window over BEFORE debiting it, at the exact boundary:
+// a spend one nanosecond before resetAt still owes the OLD window, a spend at or after
+// resetAt belongs to a FRESH one. Allow already gets this right (via refreshWindow);
+// Spend used to skip refreshWindow entirely and always debit whatever remaining held,
+// stale or not.
+func TestQuotaLimiterSpendRollsOverWindowAtBoundary(t *testing.T) {
+	const margin, budget, spentInWindow1 = 20, 200, 150
+	window := time.Minute
+
+	cases := []struct {
+		name string
+		at   time.Time
+		want int // remaining immediately after Spend(at, 3)
+	}{
+		// Still window 1: its already-spent-down remaining (50) takes the debit.
+		{"just before reset: still the old window", openHour.Add(window).Add(-time.Nanosecond), budget - spentInWindow1 - 3},
+		// Window 2 has begun: a fresh budget takes the debit, window 1's spend is behind it.
+		{"exactly at reset: already the new window", openHour.Add(window), budget - 3},
+		{"just after reset: the new window", openHour.Add(window).Add(time.Nanosecond), budget - 3},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			q := NewQuotaLimiterBudget(margin, budget, window)
+			q.Allow(openHour, 1)              // bootstrap window 1: remaining=200, resetAt=openHour+1m
+			q.Spend(openHour, spentInWindow1) // pay it down so old-vs-new-window is observable below
+			q.Spend(c.at, 3)
+			if rem, _ := q.Remaining(); rem != c.want {
+				t.Fatalf("remaining=%d, want %d (window must roll over before the debit)", rem, c.want)
+			}
+		})
+	}
+}
+
+// The taker hedge is UNGATED: it Spends without a preceding Allow. If it happens to be
+// the very first RPC after a window boundary — nothing polled Allow yet to roll the
+// window over — its debit must still land against the FRESH window, not the stale one
+// (which a later Allow would then silently reset, erasing the hedge's spend from the
+// budget the engine believes it has).
+func TestQuotaLimiterUngatedHedgeSpendAsFirstRPCOfNewWindow(t *testing.T) {
+	const margin, budget = 20, 200
+	window := time.Minute
+	q := NewQuotaLimiterBudget(margin, budget, window)
+
+	q.Allow(openHour, 1) // bootstrap window 1
+	q.Spend(openHour, budget-margin-5)
+	if rem, _ := q.Remaining(); rem != margin+5 {
+		t.Fatalf("setup: remaining=%d, want %d", rem, margin+5)
+	}
+
+	// Window 1 elapses with no further Allow — a hedge fires straight into window 2.
+	afterReset := openHour.Add(window).Add(time.Nanosecond)
+	q.Spend(afterReset, 1)
+	if rem, _ := q.Remaining(); rem != budget-1 {
+		t.Fatalf("hedge spend lost the window-2 rollover: remaining=%d, want %d", rem, budget-1)
+	}
+
+	// A subsequent Allow in the same (already-rolled) window must NOT roll over again
+	// and must NOT forget the hedge's spend.
+	if ok, _ := q.Allow(afterReset.Add(time.Second), margin+1); !ok {
+		t.Fatal("budget-1 with margin left over must still allow")
+	}
+	if rem, _ := q.Remaining(); rem != budget-1 {
+		t.Fatalf("a later Allow must not re-roll the window it already rolled: remaining=%d, want %d", rem, budget-1)
+	}
+}
+
+// Legacy limiter (no self-managed window, windowLimit==0) has nothing to roll over —
+// Spend must keep debiting the broker-reported remaining exactly as before.
+func TestQuotaLimiterLegacySpendUnaffectedByRollover(t *testing.T) {
+	q := NewQuotaLimiter(5)
+	q.Set(10, openHour.Add(time.Minute))
+	q.Spend(openHour.Add(time.Hour), 3) // far past any "window" — legacy has none
+	if rem, _ := q.Remaining(); rem != 7 {
+		t.Fatalf("remaining=%d, want 7 (legacy Spend must not gain a rollover side effect)", rem)
+	}
+}
+
+// CONTRACT (not a bug): an authoritative broker Set always wins over any Spend that
+// landed while the usage-metrics RPC was in flight — Set's remaining is a snapshot from
+// request time and knows nothing about spends since. This pins the accepted staleness
+// window (bounded by quotaRPCTimeout, and self-healed by the next 5s poll) so a future
+// change to the merge behaviour is a deliberate decision, not a silent regression.
+func TestQuotaLimiterSetOverwritesConcurrentSpend(t *testing.T) {
+	q := NewQuotaLimiterBudget(20, 200, time.Minute)
+	q.Set(50, openHour.Add(time.Minute)) // broker snapshot taken before the in-flight spend
+
+	q.Spend(openHour, 10) // lands while that RPC is still in flight: 50 -> 40
+
+	q.Set(50, openHour.Add(time.Minute)) // the in-flight RPC's response finally arrives
+	if rem, _ := q.Remaining(); rem != 50 {
+		t.Fatalf("remaining=%d, want 50 (Set is last-write-wins by design; the 10-op spend is absorbed once the next poll runs)", rem)
 	}
 }

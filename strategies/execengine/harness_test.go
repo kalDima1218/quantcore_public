@@ -471,7 +471,7 @@ func (s *stubLimiter) Allow(time.Time, int) (bool, time.Time) {
 	}
 	return s.ok, s.retryAt
 }
-func (s *stubLimiter) Spend(ops int) { s.spent += ops }
+func (s *stubLimiter) Spend(_ time.Time, ops int) { s.spent += ops }
 
 func (m *fakeMaker) record(sym, id string) {
 	if m.ids == nil {
