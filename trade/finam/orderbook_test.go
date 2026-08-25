@@ -199,3 +199,17 @@ func TestSendKeepNewestEvictsOldest(t *testing.T) {
 		}
 	}
 }
+
+func TestApplyRowNilRowDoesNotMutateBooks(t *testing.T) {
+	bidBook := map[float64]float64{100: 2}
+	askBook := map[float64]float64{101: 3}
+
+	applyRow(nil, bidBook, askBook, "LEGA@RTSX")
+
+	if got := bidBook[100]; got != 2 {
+		t.Fatalf("bid book changed after nil row: got %v, want %v", got, 2.0)
+	}
+	if got := askBook[101]; got != 3 {
+		t.Fatalf("ask book changed after nil row: got %v, want %v", got, 3.0)
+	}
+}

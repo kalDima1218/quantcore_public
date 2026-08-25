@@ -145,6 +145,9 @@ func GetLastQuote(ctx context.Context, client *Client, symbol string) (*marketda
 }
 
 func applyRow(row *marketdata.StreamOrderBook_Row, bidBook, askBook map[float64]float64, symbol string) {
+	if row == nil {
+		return
+	}
 	if row.Price == nil {
 		return
 	}
