@@ -32,8 +32,53 @@ const (
 
 var (
 	mu      sync.Mutex
-	loggers = map[string]*log.Logger{}
+	loggers = map[string]*Logger{}
 )
+
+// Level is an operational severity, carried as a typed value on Critical/Warn/Log rather
+// than baked into the message text as a "CRITICAL:"/"Warning:" string prefix a downstream
+// consumer (grep, an alert rule, a test) would have to parse out of free text — a prefix
+// that drifts silently if a call site is worded differently or the text is edited later.
+// The method name itself (Critical vs Warn) is what a call site commits to, so grepping
+// for ".Critical(" finds every critical event reliably; routine logging keeps using the
+// existing unleveled Printf, unchanged.
+type Level int
+
+const (
+	LevelWarn Level = iota
+	LevelCritical
+)
+
+func (lv Level) String() string {
+	switch lv {
+	case LevelCritical:
+		return "CRITICAL"
+	case LevelWarn:
+		return "WARNING"
+	default:
+		return "INFO"
+	}
+}
+
+// Logger wraps *log.Logger to add typed-severity logging alongside every existing call
+// site's routine Printf, which keeps working unchanged via embedding.
+type Logger struct {
+	*log.Logger
+}
+
+// Log writes one record at level: the rendered text still carries a human-readable tag
+// for operators tailing logs/<module>.log exactly as before, but level is a real
+// parameter here, not something inferred from the message text afterward.
+func (l *Logger) Log(level Level, format string, args ...any) {
+	l.Printf("["+level.String()+"] "+format, args...)
+}
+
+// Critical logs an operationally critical event: a state the engine cannot resolve
+// itself and that an operator must see (a stray fill, a naked leg, a position mismatch).
+func (l *Logger) Critical(format string, args ...any) { l.Log(LevelCritical, format, args...) }
+
+// Warn logs a degraded-but-recoverable event (a reconcile divergence, impaired mode).
+func (l *Logger) Warn(format string, args ...any) { l.Log(LevelWarn, format, args...) }
 
 func dir() string {
 	if d := os.Getenv(envDir); d != "" {
@@ -46,7 +91,7 @@ func dir() string {
 // to the file and to stderr (the pre-existing behaviour every operator setup relies on).
 // If the file cannot be opened the logger degrades to stderr-only after one warning —
 // a broken disk must never stop the bot from logging, let alone from trading.
-func For(module string) *log.Logger {
+func For(module string) *Logger {
 	mu.Lock()
 	defer mu.Unlock()
 	if l, ok := loggers[module]; ok {
@@ -61,14 +106,14 @@ func For(module string) *log.Logger {
 	} else {
 		w = io.MultiWriter(os.Stderr, f)
 	}
-	l := log.New(w, "", flags)
+	l := &Logger{Logger: log.New(w, "", flags)}
 	loggers[module] = l
 	return l
 }
 
 // Trades returns the bot's trade-history logger (logs/trades.log) — one record per own
 // fill, separate from every module's error log.
-func Trades() *log.Logger {
+func Trades() *Logger {
 	return For(tradesName)
 }
 

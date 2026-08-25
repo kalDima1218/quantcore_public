@@ -96,6 +96,12 @@ func (p *placer) logf(format string, args ...any) {
 	mlog.Printf("[execengine]"+p.logTag+" "+format, args...)
 }
 
+// critical mirrors execengine.Engine.critical: severity is a typed modlog.Level, not a
+// hand-spelled "CRITICAL:" prefix — see that method's doc comment.
+func (p *placer) critical(format string, args ...any) {
+	mlog.Critical("[execengine]"+p.logTag+" "+format, args...)
+}
+
 func newPlacer(c *finam.Client, logTag string) *placer {
 	p := &placer{
 		c:      c,

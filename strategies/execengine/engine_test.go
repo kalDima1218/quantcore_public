@@ -8,12 +8,38 @@ package execengine
 // Фикстура — в harness_test.go.
 
 import (
+	"bytes"
 	"fmt"
 	"math/rand"
+	"os"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
+
+// TestCriticalAndWarnCarryTypedSeverity pins that e.critical/e.warn route through
+// modlog's typed Level methods (see modlog.Logger.Critical/Warn) rather than baking a
+// "CRITICAL:"/"Warning:" string into the format text by hand at each of the ~25 call
+// sites that need it — the level is a real parameter on the shared mlog logger, not a
+// convention every caller has to remember to spell the same way.
+func TestCriticalAndWarnCarryTypedSeverity(t *testing.T) {
+	var buf bytes.Buffer
+	mlog.SetOutput(&buf)
+	defer mlog.SetOutput(os.Stderr) // modlog.For writes stderr-only under go test
+
+	e := newTestEngine(&fakeMaker{}, &fakeTaker{}, 2)
+	e.critical("stray fill of %d lots on %s", 3, testLegA)
+	e.warn("reconcile diverged: have=%d want=%d", 5, 6)
+
+	got := buf.String()
+	if !strings.Contains(got, "[CRITICAL]") || !strings.Contains(got, "stray fill of 3 lots") {
+		t.Fatalf("critical output = %q, want a [CRITICAL] tag and the formatted message", got)
+	}
+	if !strings.Contains(got, "[WARNING]") || !strings.Contains(got, "reconcile diverged: have=5 want=6") {
+		t.Fatalf("warn output = %q, want a [WARNING] tag and the formatted message", got)
+	}
+}
 
 // Zero and negative lot counts are malformed stream noise: they must not designate a
 // maker, move accounts, or place orders.

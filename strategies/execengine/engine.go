@@ -268,6 +268,21 @@ func (e *Engine) logf(format string, args ...any) {
 	mlog.Printf("[execengine]"+e.cfg.LogTag+" "+format, args...)
 }
 
+// critical logs an operationally critical event (a stray fill, a naked leg, a position
+// mismatch, the kill-switch tripping) — see modlog.Level: the severity is a typed
+// parameter carried through mlog.Critical, not a "CRITICAL:" prefix this call site would
+// otherwise have to spell into format by hand.
+func (e *Engine) critical(format string, args ...any) {
+	mlog.Critical("[execengine]"+e.cfg.LogTag+" "+format, args...)
+}
+
+// warn logs a degraded-but-recoverable event (entering impaired mode, a reconcile
+// divergence) — see critical's doc comment for why this goes through modlog.Level
+// instead of a string prefix.
+func (e *Engine) warn(format string, args ...any) {
+	mlog.Warn("[execengine]"+e.cfg.LogTag+" "+format, args...)
+}
+
 // placeBackoff is how long to suppress new clip opens after a placement failure or a
 // rate-limiter denial with no known reset time.
 func (e *Engine) placeBackoff() time.Duration {

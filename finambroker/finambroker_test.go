@@ -3,6 +3,7 @@ package finambroker
 import (
 	"bytes"
 	"errors"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -14,6 +15,23 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// TestPlacerCriticalCarriesTypedSeverity pins that p.critical routes through modlog's
+// typed Level (see execengine's mirror test) rather than a hand-spelled "CRITICAL:"
+// prefix.
+func TestPlacerCriticalCarriesTypedSeverity(t *testing.T) {
+	var buf bytes.Buffer
+	mlog.SetOutput(&buf)
+	defer mlog.SetOutput(os.Stderr)
+
+	p := &placer{logTag: "[test]"}
+	p.critical("client id %s UNRESOLVED", "abc123")
+
+	got := buf.String()
+	if !strings.Contains(got, "[CRITICAL]") || !strings.Contains(got, "client id abc123 UNRESOLVED") {
+		t.Fatalf("critical output = %q, want a [CRITICAL] tag and the formatted message", got)
+	}
+}
 
 // The placer closes the LOST-RESPONSE race: a placement whose RPC dies in transport is
 // resolved by client id against the account's ACTIVE order list before anything is
