@@ -211,7 +211,7 @@ func TestHandleAuthFailureReconnectsAfterSustainedFailure(t *testing.T) {
 
 	// A further failure right after must not reconnect again immediately — the clock
 	// restarted at the reconnect moment, not at zero.
-	failingSince = c.handleAuthFailure(failingSince, base.Add(authStuckReconnect+time.Second))
+	c.handleAuthFailure(failingSince, base.Add(authStuckReconnect+time.Second))
 	if reconnects != 1 {
 		t.Fatalf("must not reconnect again 1s after the previous reconnect, got %d reconnects", reconnects)
 	}

@@ -162,7 +162,7 @@ func getSchedule(client *Client, symbol string) ([]session, error) {
 		return nil, fmt.Errorf("failed to get schedule: %w", err)
 	}
 
-	var out []session
+	out := make([]session, 0, len(scheduleResp.Sessions))
 	for _, s := range scheduleResp.Sessions {
 		if s.Interval == nil || s.Interval.StartTime == nil || s.Interval.EndTime == nil {
 			continue

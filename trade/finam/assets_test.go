@@ -188,10 +188,7 @@ func TestMonitorMarketOpenRefetchesWhenWindowExhausted(t *testing.T) {
 	}()
 
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if atomic.LoadInt32(&calls) >= 2 {
-			break
-		}
+	for atomic.LoadInt32(&calls) < 2 {
 		if time.Now().After(deadline) {
 			t.Fatalf("fetch called %d times after 5s, want a second fetch once the first window's only session ends", atomic.LoadInt32(&calls))
 		}
@@ -225,10 +222,7 @@ func TestMonitorMarketOpenRefetchesOnSafetyNetEvenWithinWindow(t *testing.T) {
 	}()
 
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if atomic.LoadInt32(&calls) >= 2 {
-			break
-		}
+	for atomic.LoadInt32(&calls) < 2 {
 		if time.Now().After(deadline) {
 			t.Fatalf("fetch called %d times after 5s, want a second fetch once the safety net elapses", atomic.LoadInt32(&calls))
 		}
@@ -269,10 +263,7 @@ func TestMonitorMarketOpenRetriesQuicklyWhenWindowExhausted(t *testing.T) {
 	}()
 
 	deadline := time.Now().Add(300 * time.Millisecond)
-	for {
-		if atomic.LoadInt32(&calls) >= 2 {
-			break
-		}
+	for atomic.LoadInt32(&calls) < 2 {
 		if time.Now().After(deadline) {
 			t.Fatalf("fetch called %d times after 300ms, want a second fetch quickly: an exhausted window must retry on the short cadence, not wait on the 1h safety net", atomic.LoadInt32(&calls))
 		}
@@ -323,10 +314,7 @@ func TestMonitorMarketOpenSafetyNetIsReArmedOnEveryFetch(t *testing.T) {
 	}()
 
 	deadline := time.Now().Add(time.Second)
-	for {
-		if atomic.LoadInt32(&calls) >= 2 {
-			break
-		}
+	for atomic.LoadInt32(&calls) < 2 {
 		if time.Now().After(deadline) {
 			t.Fatalf("fetch called %d times after 1s, want exactly 2 once the first (30ms) safety net elapses", atomic.LoadInt32(&calls))
 		}

@@ -99,7 +99,7 @@ func (e *Engine) serviceImpaired() {
 	// Back off while the broker keeps not answering; any progress resets the pace.
 	if progressed {
 		e.retryGap = e.placeBackoff()
-	} else if e.retryGap = e.retryGap * 2; e.retryGap > impairedRetryMax {
+	} else if e.retryGap *= 2; e.retryGap > impairedRetryMax {
 		e.retryGap = impairedRetryMax
 	}
 	e.nextRetryAt = e.now.Add(e.retryGap)

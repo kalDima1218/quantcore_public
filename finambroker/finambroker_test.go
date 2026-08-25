@@ -186,7 +186,6 @@ func TestPlacerNextClientIDConcurrentlyUnique(t *testing.T) {
 	var wg sync.WaitGroup
 	wg.Add(n)
 	for i := 0; i < n; i++ {
-		i := i
 		go func() {
 			defer wg.Done()
 			ids[i] = p.nextClientID()

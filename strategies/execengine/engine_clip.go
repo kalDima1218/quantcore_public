@@ -142,7 +142,7 @@ func (e *Engine) resolveClip(ts time.Time) {
 	}
 	// Nothing filled (as far as fill events told us): abandon the clip, UNLESS it is a closing
 	// clip and the strategy asked for guaranteed reductions — then cross the spread to finish.
-	if e.clip.makerFilled == 0 && !(e.cfg.ForceCloseOnTimeout && e.clip.intent.IsClose) {
+	if e.clip.makerFilled == 0 && (!e.cfg.ForceCloseOnTimeout || !e.clip.intent.IsClose) {
 		e.abandonClip(ts)
 		return
 	}

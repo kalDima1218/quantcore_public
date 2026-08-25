@@ -274,16 +274,16 @@ func (s *Sim) gateReadOnly(method string) error {
 // продолжать ли. Возвращённая функция after() вызывается ПОСЛЕ применения
 // мутации; она отдаёт ошибку вместо результата для drop_after_apply. mangle
 // сообщает хендлеру, как исказить order id в успешном ответе (blank/reuse).
-func (s *Sim) unaryGate(method string) (abort error, after func() error, mangle mangleID) {
+func (s *Sim) unaryGate(method string) (after func() error, mangle mangleID, abort error) {
 	d := s.faults.gate(method)
 	if d.delay > 0 {
 		time.Sleep(d.delay)
 	}
 	if d.err != nil && !d.dropAfterApply {
-		return d.err, nil, mangleNone
+		return nil, mangleNone, d.err
 	}
 	if d.dropAfterApply {
-		return nil, func() error { return d.err }, d.mangle
+		return func() error { return d.err }, d.mangle, nil
 	}
-	return nil, func() error { return nil }, d.mangle
+	return func() error { return nil }, d.mangle, nil
 }

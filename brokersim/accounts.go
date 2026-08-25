@@ -24,7 +24,7 @@ type accountsService struct {
 // accountMargin клиента). Вызывать под mu.
 func (s *Sim) accountSnapshotLocked(acc *account) *accounts.GetAccountResponse {
 	var unrealized, reserved float64
-	var poss []*accounts.Position
+	poss := make([]*accounts.Position, 0, len(acc.positions))
 	for sym, p := range acc.positions {
 		if p.qty == 0 {
 			continue

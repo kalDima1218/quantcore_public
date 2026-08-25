@@ -8,7 +8,6 @@ import (
 
 	"github.com/FinamWeb/finam-trade-api/go/grpc/tradeapi/v1/assets"
 	usage_metrics "github.com/FinamWeb/finam-trade-api/go/grpc/tradeapi/v1/metrics"
-	"google.golang.org/genproto/googleapis/type/date"
 	"google.golang.org/genproto/googleapis/type/interval"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -98,7 +97,9 @@ func (svc *assetsService) GetAsset(ctx context.Context, req *assets.GetAssetRequ
 	}
 	if cfg.ExpirationDate != "" {
 		if t, err := time.Parse("2006-01-02", cfg.ExpirationDate); err == nil {
-			resp.ExpirationDate = &date.Date{Year: int32(t.Year()), Month: int32(t.Month()), Day: int32(t.Day())}
+			resp.AssetDetails = &assets.GetAssetResponse_FutureDetails_{
+				FutureDetails: &assets.GetAssetResponse_FutureDetails{ExpirationDate: timestamppb.New(t)},
+			}
 		}
 	}
 	return resp, nil

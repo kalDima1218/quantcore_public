@@ -29,7 +29,7 @@ type ordersService struct {
 // в OrderState.Order — на этом держится восстановление потерянных ответов.
 func (svc *ordersService) PlaceOrder(ctx context.Context, req *orders.Order) (*orders.OrderState, error) {
 	svc.s.countPlace() // до unaryGate: попытка, зарубленная фолтом, — тоже нагрузка на брокера
-	abort, after, mangle := svc.s.unaryGate("PlaceOrder")
+	after, mangle, abort := svc.s.unaryGate("PlaceOrder")
 	if abort != nil {
 		return nil, abort
 	}
@@ -304,7 +304,7 @@ func abs(v float64) float64 {
 // отмен (retireQ движка).
 func (svc *ordersService) CancelOrder(ctx context.Context, req *orders.CancelOrderRequest) (*orders.OrderState, error) {
 	svc.s.countCancel() // до unaryGate: см. countPlace в PlaceOrder
-	abort, after, _ := svc.s.unaryGate("CancelOrder")
+	after, _, abort := svc.s.unaryGate("CancelOrder")
 	if abort != nil {
 		return nil, abort
 	}
