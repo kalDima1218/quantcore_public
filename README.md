@@ -26,8 +26,3 @@ two-leg (pair) strategy — a "dated" leg and a "perp" leg, referred to generica
 LegA/LegB throughout this code, same as `execengine`'s own naming. Real instrument
 tickers, spread economics, and account identifiers have been replaced with generic
 placeholders (`LEGA@RTSX`/`LEGB@RTSX`) in test fixtures and comments.
-
-## History
-
-This is a single orphan commit with no parent — it does not carry the monorepo's
-commit history (which does touch the strategy packages), by design.
