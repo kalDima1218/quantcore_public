@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"QuantCore/modlog"
+	"QuantCore/strategies/execengine/hedgemanager"
 	"QuantCore/strategies/execengine/orderregistry"
 	"QuantCore/strategies/execengine/quotebook"
 	"QuantCore/strategies/execengine/recoverymachine"
@@ -194,9 +195,10 @@ type Engine struct {
 	// wall clock, which would make backtests and unit tests non-deterministic.
 	now time.Time
 
-	// pending — see hedge.go for what it owns and why its type is named but its
-	// transitions (checkPendingTakers, placeTakerRPC's caller) stay on Engine.
-	pending pendingSet
+	// pending is the engine's real, compiler-enforced set of unconfirmed own taker order
+	// ids (package hedgemanager) — see its doc comment for why the transitions that read
+	// and write it (checkPendingTakers, placeTakerRPC's caller) stay on Engine.
+	pending hedgemanager.PendingSet
 
 	// own is the engine's real, compiler-enforced order registry: every order id this
 	// engine has placed THIS process, mapped to its fill account (package orderregistry).
@@ -213,7 +215,7 @@ func NewEngine(cfg EngineConfig, maker Maker, taker Taker, dm Decider) *Engine {
 	e := &Engine{
 		cfg: cfg, dm: dm, maker: maker, taker: taker, limiter: noLimit{}, clock: realClock{},
 		own:      orderregistry.Ledger{},
-		pending:  pendingSet{},
+		pending:  hedgemanager.PendingSet{},
 		quote:    quotebook.New(cfg.LegA, cfg.LegB),
 		recovery: recoverymachine.New(cfg.LogTag),
 	}
