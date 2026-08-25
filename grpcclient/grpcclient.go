@@ -117,6 +117,15 @@ func (c *Client) setReady(ready bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// A closed client must never become ready again. monitor() reads connectivity state
+	// with no lock spanning the read and this call — it can observe Ready moments before
+	// Close() runs and still call setReady(true) after Close has set closed=true. Checked
+	// fresh here, under the same lock Close's own setReady(false) takes, so whichever of
+	// the two runs last cannot resurrect readiness.
+	if ready && c.closed.Load() {
+		return
+	}
+
 	wasReady := c.ready.Load()
 
 	if ready && !wasReady {
@@ -161,12 +170,16 @@ func (c *Client) monitor() {
 }
 
 func (c *Client) GetConn(ctx context.Context) (*grpc.ClientConn, error) {
-	if c.ready.Load() {
-		return c.conn, nil
-	}
-
+	// closed must win over ready: Close() sets closed=true BEFORE its own setReady(false)
+	// runs, so there is a real window where ready is still true on an already-closing
+	// client. Checking ready first would hand back a connection mid-teardown as if it
+	// were healthy.
 	if c.closed.Load() {
 		return nil, ErrClosed
+	}
+
+	if c.ready.Load() {
+		return c.conn, nil
 	}
 
 	select {
