@@ -113,6 +113,8 @@ func TestLimiterDenialBacksOffUntilReset(t *testing.T) {
 	e := newTestEngine(m, tk, 2)
 	lim := &stubLimiter{ok: false, retryAt: openHour.Add(10 * time.Second)}
 	e.SetLimiter(lim)
+	clk := &fakeClock{t: openHour} // Allow's clock domain — see clock.go; kept in step with ts below
+	e.SetClock(clk)
 	seedBooks(e, openHour)
 
 	e.OnState(buyState(openHour))
@@ -121,10 +123,12 @@ func TestLimiterDenialBacksOffUntilReset(t *testing.T) {
 	}
 
 	lim.ok = true // quota window resets
+	clk.t = openHour.Add(5 * time.Second)
 	e.OnState(buyState(openHour.Add(5 * time.Second)))
 	if e.Working() {
 		t.Fatal("the engine must stay backed off until the limiter's reset time")
 	}
+	clk.t = openHour.Add(11 * time.Second)
 	e.OnState(buyState(openHour.Add(11 * time.Second)))
 	if !e.Working() {
 		t.Fatal("the engine must quote again after the reset")

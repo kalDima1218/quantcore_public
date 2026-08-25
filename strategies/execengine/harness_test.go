@@ -473,6 +473,13 @@ func (s *stubLimiter) Allow(time.Time, int) (bool, time.Time) {
 }
 func (s *stubLimiter) Spend(_ time.Time, ops int) { s.spent += ops }
 
+// fakeClock is a hand-set Clock double: tests move it independently of e.now to prove
+// quota bookkeeping (Allow/Spend) reads processing time, not the engine's data-driven
+// event clock (see clock.go).
+type fakeClock struct{ t time.Time }
+
+func (c *fakeClock) Now() time.Time { return c.t }
+
 func (m *fakeMaker) record(sym, id string) {
 	if m.ids == nil {
 		m.ids = map[string]string{}

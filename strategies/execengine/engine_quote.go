@@ -99,8 +99,11 @@ func (e *Engine) repegLeg(lo *legOrder, sym string, t touch, ts time.Time) {
 		return
 	}
 	// One placeOrder op; the limiter keeps its margin in reserve for hedges/cancels, so a
-	// tight quota simply skips the re-peg rather than risking a stuck leg later.
-	if ok, _ := e.limiter.Allow(ts, 1); !ok {
+	// tight quota simply skips the re-peg rather than risking a stuck leg later. Allow is
+	// checked on the processing clock, not ts (event clock) — same clock domain as Spend
+	// and tryOpenClip's Allow (see clock.go); retryAt is discarded here so there is no
+	// cross-domain backoffUntil write to translate.
+	if ok, _ := e.limiter.Allow(e.clock.Now(), 1); !ok {
 		return
 	}
 	if gap := e.retireOrder(lo.id); gap > 0 {

@@ -344,8 +344,9 @@ func (e *Engine) placeTakerRPC(symbol string, buy bool, lots int) (string, error
 // placeTakerRPC, it mutates e.own/e.pending/e.sink/e.limiter.
 func (e *Engine) commitTakerPlacement(symbol string, buy bool, lots int, id string, err error) bool {
 	// Every attempt is one placeOrder RPC against the broker's quota, hedges included —
-	// book it so the limiter's budget view doesn't wait on the next refresh poll.
-	e.limiter.Spend(e.now, 1)
+	// book it so the limiter's budget view doesn't wait on the next refresh poll. Processing
+	// clock, not e.now — see clock.go and engine_clip.go's placeLeg.
+	e.limiter.Spend(e.clock.Now(), 1)
 	if err != nil {
 		e.logf("taker %s (buy=%v x%d) attempt failed: %v", symbol, buy, lots, err)
 		return false

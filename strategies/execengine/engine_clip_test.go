@@ -2124,3 +2124,49 @@ func TestExecSoloMakerLegBWithHedgeRatioFallsBackToLegA(t *testing.T) {
 		t.Fatalf("LegB must NOT rest at a hedge ratio, got %v", m.calls)
 	}
 }
+
+// Placement quota (Allow/Spend) must be measured on the engine's injected processing
+// clock, not e.now (the data-driven event clock — see clock.go). Here the processing
+// clock is set two windows ahead of the event clock; if Spend booked against e.now
+// instead, the window it would land in comes from a stale bootstrap.
+func TestPlaceLegSpendsQuotaOnProcessingClockNotEventClock(t *testing.T) {
+	m, tk := &fakeMaker{}, &fakeTaker{}
+	e := newTestEngine(m, tk, 2)
+	lim := NewQuotaLimiterBudget(20, 200, time.Minute)
+	e.SetLimiter(lim)
+	processingNow := openHour.Add(2 * time.Minute)
+	e.SetClock(&fakeClock{t: processingNow})
+	seedBooks(e, openHour)
+
+	e.OnState(buyState(openHour)) // event clock stays at openHour
+	if !e.Working() {
+		t.Fatal("setup: the open must succeed")
+	}
+	if rem, _ := lim.Remaining(); rem != 200-2 {
+		t.Fatalf("remaining=%d, want %d after the clip's two maker legs", rem, 200-2)
+	}
+	if _, resetAt := lim.Allow(processingNow, 0); !resetAt.Equal(processingNow.Add(time.Minute)) {
+		t.Fatalf("resetAt=%v, want a window bootstrapped from the processing clock (%v), not the event clock", resetAt, processingNow.Add(time.Minute))
+	}
+}
+
+// Allow's retryAt is a deadline in the PROCESSING clock's domain (the broker's real quota
+// window); backoffUntil is compared against the EVENT clock (OnState's state.Time, see
+// engine_clip.go's backoff check). tryOpenClip must translate the denial into a duration
+// and re-anchor it on ts, never copy retryAt across domains verbatim.
+func TestTryOpenClipTranslatesLimiterBackoffAcrossClockDomains(t *testing.T) {
+	m, tk := &fakeMaker{}, &fakeTaker{}
+	e := newTestEngine(m, tk, 2)
+	processingNow := openHour.Add(5 * time.Minute) // deliberately far from the event clock
+	lim := &stubLimiter{ok: false, retryAt: processingNow.Add(10 * time.Second)}
+	e.SetLimiter(lim)
+	e.SetClock(&fakeClock{t: processingNow})
+	seedBooks(e, openHour)
+
+	e.OnState(buyState(openHour))
+
+	want := openHour.Add(10 * time.Second) // the 10s denial duration, re-anchored on the event clock
+	if !e.backoffUntil.Equal(want) {
+		t.Fatalf("backoffUntil=%v, want %v (duration must be re-anchored on ts, not retryAt copied verbatim)", e.backoffUntil, want)
+	}
+}

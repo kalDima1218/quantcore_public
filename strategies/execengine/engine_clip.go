@@ -310,9 +310,16 @@ func (e *Engine) tryOpenClip(in Intent, ts time.Time) {
 		floor = 1
 	}
 	for {
-		if ok, retryAt := e.limiter.Allow(ts, 2); !ok {
-			if retryAt.After(ts) {
-				e.backoffUntil = retryAt
+		// Allow is checked on the PROCESSING clock (same domain as Spend — see clock.go),
+		// not ts (the event clock OnState decided on). retryAt therefore comes back in the
+		// processing clock's domain too: translate it into a DURATION and re-anchor that
+		// onto ts before storing it in backoffUntil, which the rest of the engine compares
+		// against the event clock (see OnState's backoff check) — copying retryAt across
+		// verbatim would misfire the backoff by however far the two clocks have drifted.
+		processingNow := e.clock.Now()
+		if ok, retryAt := e.limiter.Allow(processingNow, 2); !ok {
+			if retryAt.After(processingNow) {
+				e.backoffUntil = ts.Add(retryAt.Sub(processingNow))
 			} else {
 				e.backoffUntil = ts.Add(e.placeBackoff())
 			}
@@ -553,8 +560,10 @@ func (e *Engine) placeLeg(lo *legOrder, sym string, lots int) error {
 		id, err = e.maker.PlaceAsk(sym, lots, lo.price)
 	}
 	// One placeOrder RPC spent whether or not it succeeded — the broker meters requests,
-	// not accepted orders.
-	e.limiter.Spend(e.now, 1)
+	// not accepted orders. Spend books against the PROCESSING clock (read right after the
+	// RPC returns), never e.now: a broker quota window is real time, and e.now can lag
+	// arbitrarily far behind it while this very RPC was in flight (see clock.go).
+	e.limiter.Spend(e.clock.Now(), 1)
 	if err != nil {
 		return err
 	}

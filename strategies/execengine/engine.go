@@ -166,6 +166,7 @@ type Engine struct {
 	maker   Maker
 	taker   Taker
 	limiter Limiter
+	clock   Clock // processing-time source for quota bookkeeping (Allow/Spend) — see clock.go
 	sink    FillSink // optional (live only): fed the engine's acted-on executions as they happen — see FillSink; credited in OnFill/finishRetire/tryPlaceTaker
 
 	backoffUntil time.Time // suppress opening new clips until this time (rate-limit / failure backoff)
@@ -295,7 +296,7 @@ type ordAcct struct {
 // and dm's decisions.
 func NewEngine(cfg EngineConfig, maker Maker, taker Taker, dm Decider) *Engine {
 	e := &Engine{
-		cfg: cfg, dm: dm, maker: maker, taker: taker, limiter: noLimit{},
+		cfg: cfg, dm: dm, maker: maker, taker: taker, limiter: noLimit{}, clock: realClock{},
 		own:     map[string]*ordAcct{},
 		pending: map[string]struct{}{},
 	}
@@ -333,6 +334,16 @@ func (e *Engine) advanceNow(ts time.Time) {
 func (e *Engine) SetLimiter(l Limiter) {
 	if l != nil {
 		e.limiter = l
+	}
+}
+
+// SetClock installs the processing-time source quota bookkeeping (Allow/Spend) reads —
+// live callers never need this (realClock is the default); tests and Backtest inject a
+// controllable Clock to keep quota-window assertions deterministic. Call once before the
+// engine starts processing events; a nil clock is ignored.
+func (e *Engine) SetClock(c Clock) {
+	if c != nil {
+		e.clock = c
 	}
 }
 
