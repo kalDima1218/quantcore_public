@@ -20,15 +20,15 @@ func (e *Engine) OnBook(symbol string, ts time.Time, bestBid, bestAsk float64) {
 	// wins; equal timestamps still apply (intra-timestamp updates arrive in order).
 	switch symbol {
 	case e.cfg.LegA:
-		if e.legA.ok && ts.Before(e.legA.ts) {
+		if e.quote.legA.ok && ts.Before(e.quote.legA.ts) {
 			return
 		}
-		e.legA = touch{bid: bestBid, ask: bestAsk, ts: ts, ok: true}
+		e.quote.legA = touch{bid: bestBid, ask: bestAsk, ts: ts, ok: true}
 	case e.cfg.LegB:
-		if e.legB.ok && ts.Before(e.legB.ts) {
+		if e.quote.legB.ok && ts.Before(e.quote.legB.ts) {
 			return
 		}
-		e.legB = touch{bid: bestBid, ask: bestAsk, ts: ts, ok: true}
+		e.quote.legB = touch{bid: bestBid, ask: bestAsk, ts: ts, ok: true}
 	default:
 		return
 	}
@@ -63,12 +63,12 @@ func (e *Engine) maybeRepeg(symbol string, ts time.Time) {
 		if c.mode == ExecSoloMakerLegB {
 			return // LegA is never rested when the perp is the sole passive
 		}
-		e.repegLeg(&c.legA, e.cfg.LegA, e.legA, ts)
+		e.repegLeg(&c.legA, e.cfg.LegA, e.quote.legA, ts)
 	case e.cfg.LegB:
 		if c.mode == ExecSoloMaker {
 			return // LegB is never rested in single-passive mode — nothing to re-peg
 		}
-		e.repegLeg(&c.legB, e.cfg.LegB, e.legB, ts)
+		e.repegLeg(&c.legB, e.cfg.LegB, e.quote.legB, ts)
 	}
 }
 
@@ -134,7 +134,7 @@ func (e *Engine) repegLeg(lo *legOrder, sym string, t touch, ts time.Time) {
 	if err := e.placeLeg(lo, sym, e.clip.target); err != nil {
 		e.logf("re-peg place %s failed: %v — abandoning clip", sym, err)
 		e.CancelClip() // settles the other leg; the re-pegged leg is already retired
-		e.backoffUntil = ts.Add(e.placeBackoff())
+		e.quote.backoffUntil = ts.Add(e.placeBackoff())
 		return
 	}
 	lo.lastRepeg = ts
@@ -150,8 +150,8 @@ func (e *Engine) checkStaleBooks(now time.Time) {
 	if !e.cfg.PullOnStaleBook || e.cfg.MaxStaleness <= 0 || e.clip == nil || e.recovery.halted {
 		return
 	}
-	staleA := !e.legA.ok || now.Sub(e.legA.ts) > e.cfg.MaxStaleness
-	staleB := !e.legB.ok || now.Sub(e.legB.ts) > e.cfg.MaxStaleness
+	staleA := !e.quote.legA.ok || now.Sub(e.quote.legA.ts) > e.cfg.MaxStaleness
+	staleB := !e.quote.legB.ok || now.Sub(e.quote.legB.ts) > e.cfg.MaxStaleness
 	if !staleA && !staleB {
 		return
 	}
@@ -163,9 +163,9 @@ func (e *Engine) checkStaleBooks(now time.Time) {
 // the credit-time price estimate for a placed taker's sink credit. 0 when the leg has no
 // touch yet; the fill event's amend replaces the estimate either way.
 func (e *Engine) crossPrice(symbol string, buy bool) float64 {
-	t := e.legA
+	t := e.quote.legA
 	if symbol == e.cfg.LegB {
-		t = e.legB
+		t = e.quote.legB
 	}
 	return t.sidePrice(!buy) // a buy crosses the resting ask, a sell the resting bid
 }

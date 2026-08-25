@@ -2166,7 +2166,7 @@ func TestTryOpenClipTranslatesLimiterBackoffAcrossClockDomains(t *testing.T) {
 	e.OnState(buyState(openHour))
 
 	want := openHour.Add(10 * time.Second) // the 10s denial duration, re-anchored on the event clock
-	if !e.backoffUntil.Equal(want) {
-		t.Fatalf("backoffUntil=%v, want %v (duration must be re-anchored on ts, not retryAt copied verbatim)", e.backoffUntil, want)
+	if !e.quote.backoffUntil.Equal(want) {
+		t.Fatalf("backoffUntil=%v, want %v (duration must be re-anchored on ts, not retryAt copied verbatim)", e.quote.backoffUntil, want)
 	}
 }

@@ -54,7 +54,7 @@ func (e *Engine) OnState(state RowState) {
 	// Rate-limit / failure backoff: suppress opening new clips until the backoff clears so
 	// a rejected order is never retried on the next bar (the request-storm that exhausts
 	// the broker's quota).
-	if state.Time.Before(e.backoffUntil) {
+	if state.Time.Before(e.quote.backoffUntil) {
 		return
 	}
 	in := e.dm.Peek(state)
@@ -319,9 +319,9 @@ func (e *Engine) tryOpenClip(in Intent, ts time.Time) {
 		processingNow := e.clock.Now()
 		if ok, retryAt := e.limiter.Allow(processingNow, 2); !ok {
 			if retryAt.After(processingNow) {
-				e.backoffUntil = ts.Add(retryAt.Sub(processingNow))
+				e.quote.backoffUntil = ts.Add(retryAt.Sub(processingNow))
 			} else {
-				e.backoffUntil = ts.Add(e.placeBackoff())
+				e.quote.backoffUntil = ts.Add(e.placeBackoff())
 			}
 			return
 		}
@@ -341,11 +341,11 @@ func (e *Engine) tryOpenClip(in Intent, ts time.Time) {
 // canQuote reports whether both legs currently carry a valid, non-crossed and sufficiently
 // fresh book to place orders against as of ts.
 func (e *Engine) canQuote(ts time.Time) bool {
-	if !e.legA.valid() || !e.legB.valid() {
+	if !e.quote.legA.valid() || !e.quote.legB.valid() {
 		return false
 	}
 	if e.cfg.MaxStaleness > 0 &&
-		(ts.Sub(e.legA.ts) > e.cfg.MaxStaleness || ts.Sub(e.legB.ts) > e.cfg.MaxStaleness) {
+		(ts.Sub(e.quote.legA.ts) > e.cfg.MaxStaleness || ts.Sub(e.quote.legB.ts) > e.cfg.MaxStaleness) {
 		return false
 	}
 	return true
@@ -401,15 +401,15 @@ func (e *Engine) openClip(in Intent, lots int, ts time.Time) (opened, retryable 
 	// rests at its own side's touch.
 	legA := legOrder{isBid: dir > 0}
 	legB := legOrder{isBid: dir < 0}
-	legA.price = e.legA.sidePrice(legA.isBid)
-	legB.price = e.legB.sidePrice(legB.isBid)
+	legA.price = e.quote.legA.sidePrice(legA.isBid)
+	legB.price = e.quote.legB.sidePrice(legB.isBid)
 	// Leg-B solo is the mirror of the LegA case: rest the perp alone and let the existing
 	// first-fill path taker-hedge LegA. Which leg is worth resting is a property of the pair
 	// (the wider half-spread), not of the engine, so both mirrors exist.
 	if mode == ExecSoloMakerLegB {
 		if err := e.placeLeg(&legB, e.cfg.LegB, e.hedgeLots(e.cfg.LegB, lots)); err != nil {
 			e.logf("place legB failed: %v", err)
-			e.backoffUntil = ts.Add(e.placeBackoff())
+			e.quote.backoffUntil = ts.Add(e.placeBackoff())
 			// Nothing placed yet, so size is renegotiable — but only for a CLOSING clip: an
 			// opening clip's size is the Decider's entry sizing (room under the cap/SizeGate),
 			// and shrinking it on a margin reject would silently under-open a position the
@@ -426,7 +426,7 @@ func (e *Engine) openClip(in Intent, lots int, ts time.Time) (opened, retryable 
 	}
 	if err := e.placeLeg(&legA, e.cfg.LegA, lots); err != nil {
 		e.logf("place legA failed: %v", err)
-		e.backoffUntil = ts.Add(e.placeBackoff())
+		e.quote.backoffUntil = ts.Add(e.placeBackoff())
 		// See the ExecSoloMakerLegB branch above: only a CLOSING clip's first placement is
 		// ladder-eligible.
 		return false, in.IsClose && !MaybeDelivered(err)
@@ -441,7 +441,7 @@ func (e *Engine) openClip(in Intent, lots int, ts time.Time) (opened, retryable 
 			if gap := e.retireOrder(legA.id); gap > 0 {
 				e.takerRetry(e.cfg.LegB, legB.isBid, e.hedgeLots(e.cfg.LegB, gap))
 			}
-			e.backoffUntil = ts.Add(e.placeBackoff())
+			e.quote.backoffUntil = ts.Add(e.placeBackoff())
 			// legA already rested (and may have caught a race fill before its cancel): the
 			// ladder's "retry the whole pair smaller" would attempt MORE on top of whatever
 			// gap already got hedged, potentially overshooting the Decider's intended size

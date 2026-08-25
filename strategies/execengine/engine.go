@@ -169,10 +169,10 @@ type Engine struct {
 	clock   Clock    // processing-time source for quota bookkeeping (Allow/Spend) — see clock.go
 	sink    FillSink // optional (live only): fed the engine's acted-on executions as they happen — see FillSink; credited in OnFill/finishRetire/tryPlaceTaker
 
-	backoffUntil time.Time // suppress opening new clips until this time (rate-limit / failure backoff)
+	// quote groups the latest per-leg book touch and the open-new-clip backoff — see
+	// quote.go for why these fields are grouped but their transitions stay on Engine.
+	quote quote
 
-	legA touch
-	legB touch
 	clip *clip // the in-flight clip (nil when idle), at most one at a time
 
 	// recovery groups the kill-switch, connection-trouble mode, reconcile-divergence
