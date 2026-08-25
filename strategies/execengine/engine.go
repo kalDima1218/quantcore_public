@@ -186,12 +186,9 @@ type Engine struct {
 	// wall clock, which would make backtests and unit tests non-deterministic.
 	now time.Time
 
-	// pending is the set of own taker order ids whose placement credit the broker has NOT yet
-	// confirmed (fill events covering the placed size, or a terminal status). The engine's
-	// model books a placed taker as done, but that is an ASSUMPTION until data confirms it:
-	// past TakerConfirmTimeout the engine stops opening new clips on top of the unconfirmed
-	// hedge and polls the order's status until the broker answers (see checkPendingTakers).
-	pending map[string]struct{}
+	// pending — see hedge.go for what it owns and why its type is named but its
+	// transitions (checkPendingTakers, placeTakerRPC's caller) stay on Engine.
+	pending pendingSet
 
 	// own maps every order id this engine has placed THIS process to its fill account —
 	// see ledger.go for what it owns and why its type is named but its transitions
@@ -205,7 +202,7 @@ func NewEngine(cfg EngineConfig, maker Maker, taker Taker, dm Decider) *Engine {
 	e := &Engine{
 		cfg: cfg, dm: dm, maker: maker, taker: taker, limiter: noLimit{}, clock: realClock{},
 		own:     ledger{},
-		pending: map[string]struct{}{},
+		pending: pendingSet{},
 	}
 	// A hedge ratio outside single-passive mode is a misconfiguration the engine must not
 	// trade through. It cannot convert a LegB fill back into whole LegA lots, and the only
