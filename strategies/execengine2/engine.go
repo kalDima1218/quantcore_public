@@ -43,6 +43,8 @@ type Engine struct {
 	orders *orders.List
 	hedges *hedges.List
 	state  *run.State
+
+	reusedIDBarrier bool
 }
 
 // Info — короткий снимок состояния движка.
@@ -227,6 +229,7 @@ func (e *Engine) OnFill(ctx context.Context, fill Fill) error {
 	e.sendChange(change, "fill")
 	if change.Conflict {
 		e.logger.Criticalf("order %s executed beyond its terminal acknowledgement", fill.OrderID)
+		e.state.NeedCheck("execution contradicted a terminal order acknowledgement")
 	}
 	if change.Extra > 0 {
 		e.logger.Criticalf("order %s reported %d impossible lots beyond placed size; dropped", fill.OrderID, change.Extra)
@@ -303,13 +306,13 @@ func (e *Engine) StopTrade(ctx context.Context) error {
 }
 
 // Stop запрещает новые сделки и снимает открытые заявки.
-// Уже найденная позиция всё равно будет закрыта хеджем.
+// После kill-switch движок больше не отправляет новые заявки, включая хеджи.
 func (e *Engine) Stop(ctx context.Context, reason string) error {
 	if ctx == nil {
 		return errors.New("nil context")
 	}
 	e.halt(reason)
-	return e.stopTrade(ctx, "engine halted", true)
+	return e.stopTrade(ctx, "engine halted", false)
 }
 
 // CheckPositions сравнивает позицию брокера с позицией стратегии.
@@ -317,6 +320,12 @@ func (e *Engine) CheckPositions(actualA, actualB int) bool {
 	expectedA := e.strategy.Position()
 	expectedB := -expectedA * e.config.Ratio
 	hasWork := e.HasTrade() || len(e.orders.OrdersToClose()) > 0 || e.hedges.HasWork()
+	if e.reusedIDBarrier && e.state.Info().Code == run.CheckNeeded && !hasWork &&
+		actualA == expectedA && actualB == expectedB {
+		e.reusedIDBarrier = false
+		e.logger.Warnf("reused order id passed the first clean position check; waiting for one stable repeat")
+		return false
+	}
 	ok := e.state.CheckPositions(actualA, actualB, expectedA, expectedB, hasWork)
 	if !ok {
 		e.logger.Warnf(
@@ -368,6 +377,13 @@ func (e *Engine) addOrder(orderID string, req model.OrderRequest) error {
 	countNow := req.Kind == model.OrderMarket
 	change, err := e.orders.Add(orderID, req, e.clock.Now(), req.Price, countNow)
 	if err != nil {
+		if countNow {
+			e.acceptUntrackedMarket(req, orderID, "broker returned an unusable taker order id: "+err.Error())
+			if orderID != "" {
+				e.reusedIDBarrier = true
+			}
+			return nil
+		}
 		e.halt("broker returned an unusable order id: " + err.Error())
 		return err
 	}
@@ -381,6 +397,21 @@ func (e *Engine) addOrder(orderID string, req model.OrderRequest) error {
 	}
 	e.trade.AddMarket(req.TradeID, req.Leg, req.Lots)
 	return nil
+}
+
+func (e *Engine) acceptUntrackedMarket(req model.OrderRequest, orderID, reason string) {
+	e.sendChange(orders.Change{
+		Known: true,
+		Lots:  req.Lots,
+		Order: orders.Info{
+			ID:         orderID,
+			Request:    req,
+			GuessPrice: req.Price,
+		},
+	}, "unverified taker placement")
+	e.trade.AddMarket(req.TradeID, req.Leg, req.Lots)
+	e.state.NeedCheck(reason)
+	e.logger.Criticalf("%s", reason)
 }
 
 func (e *Engine) sendChange(change orders.Change, reason string) {
@@ -421,6 +452,9 @@ func (e *Engine) useLimitFill(
 		return nil
 	}
 	transition := e.trade.AddFill(change.Order.ID, change.Lots)
+	if e.state.Info().Code == run.Stopped {
+		return nil
+	}
 	if !transition.Known {
 		return e.fixLateFill(ctx, change.Order.Request, change.Lots)
 	}
@@ -506,9 +540,9 @@ func (e *Engine) placeHedge(ctx context.Context, req model.OrderRequest) error {
 		}
 		lastErr = err
 		if OrderMayExist(err) {
-			e.state.NeedCheck("mandatory placement outcome is unknown")
-			e.logger.Criticalf("mandatory hedge on %s x%d is unresolved: %v", req.Symbol, req.Lots, err)
-			return err
+			orderID, _ := ErrorClientID(err)
+			e.acceptUntrackedMarket(req, orderID, "mandatory placement outcome is unknown")
+			return nil
 		}
 	}
 	e.hedges.Add(req, lastErr)
@@ -545,6 +579,9 @@ func (e *Engine) closeOrder(ctx context.Context, orderID string) (orders.Change,
 }
 
 func (e *Engine) stopTrade(ctx context.Context, reason string, allowBalance bool) error {
+	if e.state.Info().Code == run.Stopped {
+		allowBalance = false
+	}
 	ids := e.trade.Stop()
 	var result error
 	for _, orderID := range ids {
@@ -562,7 +599,9 @@ func (e *Engine) stopTrade(ctx context.Context, reason string, allowBalance bool
 		e.trade.DropEmpty()
 		return result
 	}
-	result = errors.Join(result, e.hedgeTrade(ctx, model.RoleFix))
+	if len(e.hedges.All()) == 0 {
+		result = errors.Join(result, e.hedgeTrade(ctx, model.RoleFix))
+	}
 	if e.trade.IsPaired() {
 		e.finishTrade(e.clock.Now(), true)
 	}
@@ -582,7 +621,7 @@ func (e *Engine) finishTrade(at time.Time, allowPartial bool) {
 	e.logger.Infof("committed clip action=%d lots=%d position=%d", plan.Action, plan.Lots, e.strategy.Position())
 }
 
-func (e *Engine) useMarketStatus(ctx context.Context, orderID string, status model.OrderStatus) error {
+func (e *Engine) useMarketStatus(_ context.Context, orderID string, status model.OrderStatus) error {
 	result := e.hedges.SetStatus(orderID, status)
 	if !result.Known {
 		return nil
@@ -599,7 +638,12 @@ func (e *Engine) useMarketStatus(ctx context.Context, orderID string, status mod
 		}
 	}
 	if result.Missing.Lots > 0 {
-		return e.placeHedge(ctx, result.Missing)
+		e.hedges.Add(result.Missing, nil)
+		e.state.StartFix(e.clock.Now(), e.config.RetryWait, "taker executed fewer lots than requested")
+		e.logger.Warnf(
+			"queued taker shortfall on %s x%d for recovery",
+			result.Missing.Symbol, result.Missing.Lots,
+		)
 	}
 	return nil
 }

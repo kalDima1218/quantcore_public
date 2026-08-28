@@ -262,6 +262,67 @@ func TestUnknownOpenNeedsCheck(t *testing.T) {
 	}
 }
 
+func TestUnknownHedgeIsBlindCredited(t *testing.T) {
+	t.Parallel()
+	f := newTestSet(t, func(_ *execengine2.Config, broker *fakeBroker) {
+		broker.placeFunc = func(
+			_ context.Context, _ execengine2.OrderRequest, call int,
+		) (string, error) {
+			if call == 3 {
+				return "", execengine2.OrderUnknown("cid-3", context.DeadlineExceeded)
+			}
+			return fmt.Sprintf("o%d", call), nil
+		}
+	})
+	if err := f.engine.OnSignal(context.Background(), execengine2.Signal{Time: f.now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.engine.OnFill(context.Background(), execengine2.Fill{
+		FillID: "trade-a", OrderID: "o1", Lots: 2, Price: 99,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	info := f.engine.Info()
+	if info.Code != execengine2.StateCheckNeeded || info.HasTrade || info.MarketOrders != 0 ||
+		f.engine.Position() != 2 {
+		t.Fatalf("unverified hedge snapshot = %+v position=%d", info, f.engine.Position())
+	}
+	if len(f.sink.positions) != 2 || f.sink.positions[1].Lots != -2 {
+		t.Fatalf("blind hedge accounting = %+v", f.sink.positions)
+	}
+	if !f.engine.CheckPositions(2, -2) {
+		t.Fatal("clean position check did not confirm the untracked hedge")
+	}
+}
+
+func TestReusedTakerIDNeedsStableReconcile(t *testing.T) {
+	t.Parallel()
+	f := newTestSet(t, func(_ *execengine2.Config, broker *fakeBroker) {
+		broker.placeFunc = func(
+			_ context.Context, _ execengine2.OrderRequest, call int,
+		) (string, error) {
+			if call == 3 {
+				return "o2", nil
+			}
+			return fmt.Sprintf("o%d", call), nil
+		}
+	})
+	if err := f.engine.OnSignal(context.Background(), execengine2.Signal{Time: f.now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.engine.OnFill(context.Background(), execengine2.Fill{
+		FillID: "trade-a", OrderID: "o1", Lots: 2, Price: 99,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if f.engine.CheckPositions(2, -2) || f.engine.Code() != execengine2.StateCheckNeeded {
+		t.Fatal("reused id was released by the first clean position check")
+	}
+	if !f.engine.CheckPositions(2, -2) || f.engine.Code() != execengine2.StateReady {
+		t.Fatal("stable repeated position check did not release reused-id quarantine")
+	}
+}
+
 func TestMarketShortFillGetsHedge(t *testing.T) {
 	t.Parallel()
 	f := newTestSet(t, nil)
@@ -276,6 +337,13 @@ func TestMarketShortFillGetsHedge(t *testing.T) {
 	if err := f.engine.OnOrderStatus(
 		context.Background(), "o3", execengine2.OrderStatus{Filled: 1, Done: true},
 	); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.broker.places) != 3 || f.engine.Code() != execengine2.StateFixing {
+		t.Fatalf("shortfall was not deferred: calls=%d state=%s", len(f.broker.places), f.engine.Code())
+	}
+	f.clock.now = f.now.Add(time.Second)
+	if err := f.engine.OnTick(context.Background(), f.clock.now); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.broker.places) != 4 || f.broker.places[3].req.Lots != 1 ||
@@ -320,6 +388,29 @@ func TestFailedHedgeIsSaved(t *testing.T) {
 	snap := f.engine.Info()
 	if snap.Hedges != 0 || snap.MarketOrders != 1 || f.engine.Position() != 2 {
 		t.Fatalf("snapshot after recovery = %+v position=%d", snap, f.engine.Position())
+	}
+}
+
+func TestStopDoesNotHedgeLateFill(t *testing.T) {
+	t.Parallel()
+	f := newTestSet(t, nil)
+	if err := f.engine.OnSignal(context.Background(), execengine2.Signal{Time: f.now}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.engine.Stop(context.Background(), "manual"); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.engine.OnFill(context.Background(), execengine2.Fill{
+		FillID: "late-a", OrderID: "o1", Lots: 2, Price: 99,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.broker.places) != 2 {
+		t.Fatalf("halted engine placed a hedge: %+v", f.broker.places)
+	}
+	if f.engine.Code() != execengine2.StateStopped || len(f.sink.positions) != 1 ||
+		f.sink.positions[0].Lots != 2 {
+		t.Fatalf("late fill after stop: state=%s changes=%+v", f.engine.Code(), f.sink.positions)
 	}
 }
 

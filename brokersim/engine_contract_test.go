@@ -251,6 +251,8 @@ type v2HarnessEngine struct{}
 
 func (v2HarnessEngine) Name() string { return "execengine2" }
 
+type current = v2HarnessEngine
+
 func (v2HarnessEngine) Build(
 	t *testing.T,
 	client *finam.Client,

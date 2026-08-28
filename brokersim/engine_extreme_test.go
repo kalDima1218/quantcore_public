@@ -167,7 +167,7 @@ func withQuotaBudget(margin, budget int, window time.Duration) harnessOpt {
 }
 
 func newEngineHarness(t *testing.T, cfg brokersim.Config, opts ...harnessOpt) *engineHarness {
-	return newEngineHarnessWith(t, cfg, v1HarnessEngine{}, opts...)
+	return newEngineHarnessWith(t, cfg, current{}, opts...)
 }
 
 func newEngineHarnessWith(
