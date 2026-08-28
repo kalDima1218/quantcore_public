@@ -2,10 +2,10 @@
 
 package brokersim_test
 
-// Интеграционный экстрим-харнесс: НАСТОЯЩИЙ execengine.Engine (стейт-машина
-// post-at-touch / hedge-on-fill / impaired / retireQ / hedge-debts / reconcile)
-// с NewFinamMaker/NewFinamTaker поверх реального gRPC-клиента trade/finam против
-// brokersim. Скриптовый Decider диктует входы/выходы детерминированно, а
+// Интеграционный экстрим-харнесс гоняет движок через общий harnessEngine.
+// Адаптеры execengine/execengine2 подключают настоящие движки и Finam-шлюзы
+// поверх реального gRPC-клиента trade/finam против brokersim. Скриптовый
+// Decider диктует входы/выходы детерминированно, а
 // control-plane сима вбрасывает экстремальные последовательности сбоев. После
 // каждого сценария проверяются ИНВАРИАНТЫ движка против наземной правды брокера:
 //
@@ -22,7 +22,6 @@ package brokersim_test
 // предположения и данные.
 
 import (
-	"context"
 	"math"
 	"os"
 	"sync"
@@ -54,43 +53,35 @@ const (
 // движка (как basis-леджер): posA/posB — подписанные нетто-лоты по каждой ноге.
 // Engine.Position() == posA (нога A), reconcile ждёт legB == -posA.
 type scriptDecider struct {
-	intent     execengine.Intent
+	intent     engineIntent
 	maxPos     int
 	posA, posB int
 }
 
-func (d *scriptDecider) Peek(execengine.RowState) execengine.Intent {
+type engineIntent struct {
+	action  int
+	isClose bool
+	lots    int
+}
+
+func (d *scriptDecider) peek() engineIntent {
 	in := d.intent
 	// Уважать кап на открытии, чтобы не открывать бесконечно.
-	if in.Action != 0 && !in.IsClose && abs(d.posA) >= d.maxPos {
-		return execengine.Intent{}
+	if in.action != 0 && !in.isClose && abs(d.posA) >= d.maxPos {
+		return engineIntent{}
 	}
 	return in
 }
 
-func (d *scriptDecider) Commit(in execengine.Intent, _ time.Time) execengine.Decision {
-	// Позиция приходит из FillSink, не из Commit (как в basis: леджер — источник
-	// позиции, Commit ведёт лот-бук). Здесь Commit — no-op для позиции.
-	return execengine.Decision{Decision: in.Action}
-}
-
-func (d *scriptDecider) Position() int { return d.posA }
-
-// FillSink: движок кредитует обе ноги по мере действий.
-func (d *scriptDecider) Fill(sym string, buy bool, lots int, _ float64) {
-	delta := lots
-	if !buy {
-		delta = -lots
-	}
-	switch sym {
+// Updates: движок кредитует обе ноги по мере действий.
+func (d *scriptDecider) apply(symbol string, lots int) {
+	switch symbol {
 	case legA:
-		d.posA += delta
+		d.posA += lots
 	case legB:
-		d.posB += delta
+		d.posB += lots
 	}
 }
-
-func (d *scriptDecider) Amend(string, bool, int, float64, float64) {} // только цена — позицию не трогает
 
 func abs(v int) int {
 	if v < 0 {
@@ -106,11 +97,12 @@ type engineHarness struct {
 	t            *testing.T
 	srv          *brokersim.Server
 	client       *finam.Client
-	e            *execengine.Engine
+	e            harnessEngine
 	dm           *scriptDecider
-	limiter      *execengine.QuotaLimiter // nil, если лимитер не установлен
-	raceHits     int                      // сколько раз отмена реально обогнала fill-событие (под mu)
-	tickInterval time.Duration            // период quiet-market тика event-loop'а
+	setQuota     func(int, time.Time) // nil, если лимитер не установлен
+	raceHits     int                  // сколько раз отмена реально обогнала fill-событие (под mu)
+	tickInterval time.Duration        // период quiet-market тика event-loop'а
+	activeAction int                  // направление текущего клипа для общего StopTrade
 	mu           sync.Mutex
 	stop         chan struct{}
 	done         chan struct{}
@@ -125,11 +117,11 @@ func (h *engineHarness) raceCancelVsFill(price float64, lots int, buyPrint bool)
 	before := h.snap()
 	h.publicPrint(legA, price, float64(lots), buyPrint) // брокер исполняет мейкера; trade-событие async
 	h.mu.Lock()
-	if h.e.Working() && h.dm.posA == before.pos {
+	if h.e.Snapshot().working && h.dm.posA == before.pos {
 		h.raceHits++ // fill-событие ещё не обработано -> отмена его обгоняет
 	}
-	h.dm.intent = execengine.Intent{} // hold
-	h.e.PullIfUnwanted(execengine.RowState{Time: time.Now().UTC()})
+	h.dm.intent = engineIntent{} // hold
+	h.e.StopTrade()
 	h.mu.Unlock()
 }
 
@@ -175,6 +167,15 @@ func withQuotaBudget(margin, budget int, window time.Duration) harnessOpt {
 }
 
 func newEngineHarness(t *testing.T, cfg brokersim.Config, opts ...harnessOpt) *engineHarness {
+	return newEngineHarnessWith(t, cfg, v1HarnessEngine{}, opts...)
+}
+
+func newEngineHarnessWith(
+	t *testing.T,
+	cfg brokersim.Config,
+	factory harnessEngineFactory,
+	opts ...harnessOpt,
+) *engineHarness {
 	t.Helper()
 	if len(cfg.Accounts) == 0 {
 		cfg.Accounts = []brokersim.AccountConfig{{Secret: testSecret, AccountID: testAccount, InitialCash: 5_000_000}}
@@ -216,26 +217,14 @@ func newEngineHarness(t *testing.T, cfg brokersim.Config, opts ...harnessOpt) *e
 	}
 
 	dm := &scriptDecider{maxPos: b.maxPos}
-	e := execengine.NewEngine(b.ec, finambroker.NewMaker(client, ""), finambroker.NewTaker(client, ""), dm)
-	e.SetFillSink(dm)
-
-	h := &engineHarness{t: t, srv: srv, client: client, e: e, dm: dm, stop: make(chan struct{}), done: make(chan struct{})}
+	h := &engineHarness{
+		t: t, srv: srv, client: client, dm: dm,
+		stop: make(chan struct{}), done: make(chan struct{}),
+	}
+	h.e, h.setQuota = factory.Build(t, client, dm, *b, h.stop)
 	h.tickInterval = b.tick
 	if h.tickInterval == 0 {
 		h.tickInterval = 150 * time.Millisecond
-	}
-	if b.limiterQuota > 0 {
-		if b.limiterBudget > 0 {
-			h.limiter = execengine.NewQuotaLimiterBudget(b.limiterQuota, b.limiterBudget, b.limiterWindow)
-		} else {
-			h.limiter = execengine.NewQuotaLimiter(b.limiterQuota)
-		}
-		e.SetLimiter(h.limiter)
-		if b.refreshQuota {
-			ctx, cancel := context.WithCancel(context.Background())
-			go func() { <-h.stop; cancel() }()
-			go finambroker.RefreshQuota(ctx, client, h.limiter)
-		}
 	}
 	go h.run()
 	t.Cleanup(func() { close(h.stop); <-h.done })
@@ -256,20 +245,28 @@ func (h *engineHarness) run() {
 	defer recTick.Stop()
 
 	const reconcileGrace = 700 * time.Millisecond
-	seen := execengine.TradeDedup{}
 	var lastFill time.Time
 
-	// manageLocked воспроизводит basis-раннер: пока клип работает — OnTick +
-	// PullIfUnwanted (стоящий остаток клипа — вход ИЛИ выход, частичный или
-	// нет — снимается, когда интент перестаёт хотеть направление; исполненная
-	// часть уже захеджирована и остаётся); в простое — OnState. Вызывать под mu.
+	// manageLocked воспроизводит basis-раннер через общий контракт: тик обслуживает
+	// таймауты/восстановление, новый сигнал открывает клип, а смена направления
+	// снимает его через StopTrade. Вызывать под mu.
 	manageLocked := func(ts time.Time) {
-		if h.e.Working() {
-			h.e.OnTick(ts)
-			h.e.PullIfUnwanted(execengine.RowState{Time: ts})
+		h.e.OnTick(ts)
+		if h.e.Snapshot().working {
+			if wanted := h.dm.peek(); wanted.action != h.activeAction {
+				h.e.StopTrade()
+				if !h.e.Snapshot().working {
+					h.activeAction = 0
+				}
+			}
 			return
 		}
-		h.e.OnState(execengine.RowState{Time: ts})
+		h.activeAction = 0
+		plan := h.dm.peek()
+		h.e.OnSignal(ts)
+		if h.e.Snapshot().working {
+			h.activeAction = plan.action
+		}
 	}
 
 	feedBook := func(sym string, b finam.FullOrderBookData) {
@@ -296,21 +293,22 @@ func (h *engineHarness) run() {
 			}
 		case f, ok := <-fills:
 			if ok {
-				if seen.Seen(f.GetTradeId()) {
-					continue
-				}
 				h.mu.Lock()
-				h.e.OnFill(time.Now().UTC(), f.GetOrderId(), f.GetSymbol(),
+				h.e.OnFill(
+					f.GetTradeId(), f.GetOrderId(), f.GetSymbol(),
 					f.GetSide() == v1.Side_SIDE_BUY,
 					int(finam.ParseDecimal(f.GetSize().GetValue())),
-					finam.ParseDecimal(f.GetPrice().GetValue()))
+					finam.ParseDecimal(f.GetPrice().GetValue()), time.Now().UTC(),
+				)
 				h.mu.Unlock()
 				lastFill = time.Now()
 			}
 		case o, ok := <-orderStates:
 			if ok && o != nil {
 				h.mu.Lock()
-				h.e.OnOrderStatus(o.GetOrderId(), finambroker.IsDeadStatus(o.GetStatus()))
+				h.e.OnOrderStatus(
+					o.GetOrderId(), finam.ExecutedLots(o), finambroker.IsDeadStatus(o.GetStatus()),
+				)
 				h.mu.Unlock()
 			}
 		case now := <-tick.C:
@@ -322,7 +320,9 @@ func (h *engineHarness) run() {
 			h.mu.Unlock()
 		case <-recTick.C:
 			h.mu.Lock()
-			idle := !h.e.Working() && !h.e.Halted() && !h.e.Impaired() && time.Since(lastFill) > reconcileGrace
+			snap := h.e.Snapshot()
+			idle := !snap.working && snap.state != engineStopped &&
+				snap.state != engineRecovering && time.Since(lastFill) > reconcileGrace
 			h.mu.Unlock()
 			if idle {
 				// fetch без блокировки движка, затем Reconcile под mu
@@ -343,7 +343,7 @@ func (h *engineHarness) run() {
 func (h *engineHarness) setIntent(action int, isClose bool, lots int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.dm.intent = execengine.Intent{Action: action, IsClose: isClose, Lots: lots}
+	h.dm.intent = engineIntent{action: action, isClose: isClose, lots: lots}
 }
 
 func (h *engineHarness) hold() { h.setIntent(0, false, 0) }
@@ -358,17 +358,16 @@ func (h *engineHarness) setMaxPos(n int) {
 func (h *engineHarness) halt() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.e.Halt("test")
+	h.e.Stop("test")
 }
 
 // quotaSet выставляет остаток квоты установленного лимитера (для теста гейтинга) —
 // имитирует ответ RefreshQuota: token снят ДО "RPC", now — после.
 func (h *engineHarness) quotaSet(remaining int, resetAt time.Time) {
-	if h.limiter == nil {
+	if h.setQuota == nil {
 		h.t.Fatal("quotaSet: лимитер не установлен (withLimiter)")
 	}
-	token := h.limiter.Snapshot()
-	h.limiter.Set(remaining, resetAt, time.Now(), token)
+	h.setQuota(remaining, resetAt)
 }
 
 // placeForeignLimit ставит лимитник НАПРЯМУЮ через клиент (минуя движок), так что
@@ -406,11 +405,22 @@ type engineSnap struct {
 func (h *engineHarness) snap() engineSnap {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	snap := h.e.Snapshot()
+	label := ""
+	switch snap.state {
+	case engineRecovering:
+		label = "impaired"
+	case engineCheckNeeded:
+		label = "suspect"
+	case engineStopped:
+		label = "halted"
+	}
 	return engineSnap{
-		pos: h.e.Position(), posB: h.dm.posB,
-		working: h.e.Working(), impaired: h.e.Impaired(),
-		suspect: h.e.Suspect(), halted: h.e.Halted(),
-		label: h.e.StateLabel(),
+		pos: snap.position, posB: h.dm.posB,
+		working: snap.working, impaired: snap.state == engineRecovering,
+		suspect: snap.state == engineCheckNeeded,
+		halted:  snap.state == engineStopped,
+		label:   label,
 	}
 }
 
@@ -526,7 +536,13 @@ func (h *engineHarness) driveEntry(dir, lots int) {
 // TestEngineHappyPath — валидация wiring: чистый вход в лонг (мейкер-фил +
 // тейкер-хедж), затем выход, оба против реального сима. Инварианты сходятся.
 func TestEngineHappyPath(t *testing.T) {
-	h := newEngineHarness(t, brokersim.Config{})
+	for _, factory := range []harnessEngineFactory{v1HarnessEngine{}, v2HarnessEngine{}} {
+		t.Run(factory.Name(), func(t *testing.T) { testEngineHappyPath(t, factory) })
+	}
+}
+
+func testEngineHappyPath(t *testing.T, factory harnessEngineFactory) {
+	h := newEngineHarnessWith(t, brokersim.Config{}, factory)
 	h.setBook(legA, 100, 50, 102, 50)
 	h.setBook(legB, 50, 100, 52, 100)
 
