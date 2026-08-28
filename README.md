@@ -7,6 +7,9 @@ and `go test ./...` all pass.
 
 ## What's here
 
+- `strategies/execengine2` — новый компонентный движок. Его broker-neutral core
+  разделён на `quotes`, `trade`, `orders`, `hedges` и `run`; описание и пример
+  подключения находятся в [`strategies/execengine2/README.md`](strategies/execengine2/README.md).
 - `strategies/execengine` — the order-execution engine: passive limit orders, taker
   hedging on fill, re-peg, cancels, reconcile-after-reconnect, an impaired/halted mode
   for broker trouble. It knows nothing about trading signals — it takes an `Intent`

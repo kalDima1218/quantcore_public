@@ -40,7 +40,12 @@ func SideMatches(st *orders.OrderState, buy bool) bool {
 }
 
 func PlaceOrder(client *Client, order *orders.Order) (*orders.OrderState, error) {
-	conn, ctx, cancel, err := client.dial(context.Background())
+	return PlaceOrderContext(context.Background(), client, order)
+}
+
+// PlaceOrderContext отправляет заявку с ctx вызывающего кода.
+func PlaceOrderContext(ctx context.Context, client *Client, order *orders.Order) (*orders.OrderState, error) {
+	conn, ctx, cancel, err := client.dial(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to gRPC: %w", err)
 	}
@@ -60,7 +65,12 @@ func PlaceOrder(client *Client, order *orders.Order) (*orders.OrderState, error)
 
 // CancelOrder cancels the order identified by orderID and returns its resulting state.
 func CancelOrder(client *Client, orderID string) (*orders.OrderState, error) {
-	conn, ctx, cancel, err := client.dial(context.Background())
+	return CancelOrderContext(context.Background(), client, orderID)
+}
+
+// CancelOrderContext отменяет заявку с ctx вызывающего кода.
+func CancelOrderContext(ctx context.Context, client *Client, orderID string) (*orders.OrderState, error) {
+	conn, ctx, cancel, err := client.dial(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to gRPC: %w", err)
 	}
@@ -83,7 +93,12 @@ func CancelOrder(client *Client, orderID string) (*orders.OrderState, error) {
 
 // GetOrder returns the current state of the order identified by orderID.
 func GetOrder(client *Client, orderID string) (*orders.OrderState, error) {
-	conn, ctx, cancel, err := client.dial(context.Background())
+	return GetOrderContext(context.Background(), client, orderID)
+}
+
+// GetOrderContext получает заявку с ctx вызывающего кода.
+func GetOrderContext(ctx context.Context, client *Client, orderID string) (*orders.OrderState, error) {
+	conn, ctx, cancel, err := client.dial(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to gRPC: %w", err)
 	}
@@ -107,7 +122,12 @@ func GetOrder(client *Client, orderID string) (*orders.OrderState, error) {
 // off this list once it settles. Absence from the response proves "not currently active",
 // never "never existed" or "never filled" — see FindOrderByClientID.
 func GetOrders(client *Client) (*orders.OrdersResponse, error) {
-	conn, ctx, cancel, err := client.dial(context.Background())
+	return GetOrdersContext(context.Background(), client)
+}
+
+// GetOrdersContext получает список заявок с ctx вызывающего кода.
+func GetOrdersContext(ctx context.Context, client *Client) (*orders.OrdersResponse, error) {
+	conn, ctx, cancel, err := client.dial(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to gRPC: %w", err)
 	}
@@ -135,10 +155,19 @@ func GetOrders(client *Client) (*orders.OrdersResponse, error) {
 // Callers that need to shrink-and-retry on a confirmed-absent order need a stronger source
 // than this one.
 func FindOrderByClientID(client *Client, clientOrderID string) (*orders.OrderState, bool, error) {
+	return FindOrderByClientIDContext(context.Background(), client, clientOrderID)
+}
+
+// FindOrderByClientIDContext ищет заявку с ctx вызывающего кода.
+func FindOrderByClientIDContext(
+	ctx context.Context,
+	client *Client,
+	clientOrderID string,
+) (*orders.OrderState, bool, error) {
 	if clientOrderID == "" {
 		return nil, false, fmt.Errorf("empty client order id")
 	}
-	resp, err := GetOrders(client)
+	resp, err := GetOrdersContext(ctx, client)
 	if err != nil {
 		return nil, false, err
 	}
@@ -163,7 +192,17 @@ func sideOf(buy bool) v1.Side {
 // "" lets the broker auto-generate one, forfeiting lost-response recovery via
 // FindOrderByClientID.
 func placeMarketOrder(client *Client, ticker Ticker, buy bool, clientOrderID string) (*orders.OrderState, error) {
-	return PlaceOrder(client, &orders.Order{
+	return placeMarketOrderContext(context.Background(), client, ticker, buy, clientOrderID)
+}
+
+func placeMarketOrderContext(
+	ctx context.Context,
+	client *Client,
+	ticker Ticker,
+	buy bool,
+	clientOrderID string,
+) (*orders.OrderState, error) {
+	return PlaceOrderContext(ctx, client, &orders.Order{
 		AccountId: client.GetConfig().AccountID,
 		Symbol:    ticker.Symbol,
 		Quantity: &decimal.Decimal{
@@ -181,7 +220,18 @@ func placeMarketOrder(client *Client, ticker Ticker, buy bool, clientOrderID str
 // and executing as a taker: it either rests in the book or is rejected.
 // See placeMarketOrder for the clientOrderID semantics.
 func placeLimitOrder(client *Client, ticker Ticker, buy bool, price float64, clientOrderID string) (*orders.OrderState, error) {
-	return PlaceOrder(client, &orders.Order{
+	return placeLimitOrderContext(context.Background(), client, ticker, buy, price, clientOrderID)
+}
+
+func placeLimitOrderContext(
+	ctx context.Context,
+	client *Client,
+	ticker Ticker,
+	buy bool,
+	price float64,
+	clientOrderID string,
+) (*orders.OrderState, error) {
+	return PlaceOrderContext(ctx, client, &orders.Order{
 		AccountId: client.GetConfig().AccountID,
 		Symbol:    ticker.Symbol,
 		Quantity: &decimal.Decimal{
@@ -201,14 +251,56 @@ func PlaceMarketOrderBuy(client *Client, ticker Ticker, clientOrderID string) (*
 	return placeMarketOrder(client, ticker, true, clientOrderID)
 }
 
+// PlaceMarketOrderBuyContext отправляет рыночную покупку с ctx вызывающего кода.
+func PlaceMarketOrderBuyContext(
+	ctx context.Context,
+	client *Client,
+	ticker Ticker,
+	clientOrderID string,
+) (*orders.OrderState, error) {
+	return placeMarketOrderContext(ctx, client, ticker, true, clientOrderID)
+}
+
 func PlaceMarketOrderSell(client *Client, ticker Ticker, clientOrderID string) (*orders.OrderState, error) {
 	return placeMarketOrder(client, ticker, false, clientOrderID)
+}
+
+// PlaceMarketOrderSellContext отправляет рыночную продажу с ctx вызывающего кода.
+func PlaceMarketOrderSellContext(
+	ctx context.Context,
+	client *Client,
+	ticker Ticker,
+	clientOrderID string,
+) (*orders.OrderState, error) {
+	return placeMarketOrderContext(ctx, client, ticker, false, clientOrderID)
 }
 
 func PlaceLimitOrderBuy(client *Client, ticker Ticker, price float64, clientOrderID string) (*orders.OrderState, error) {
 	return placeLimitOrder(client, ticker, true, price, clientOrderID)
 }
 
+// PlaceLimitOrderBuyContext отправляет лимитную покупку с ctx вызывающего кода.
+func PlaceLimitOrderBuyContext(
+	ctx context.Context,
+	client *Client,
+	ticker Ticker,
+	price float64,
+	clientOrderID string,
+) (*orders.OrderState, error) {
+	return placeLimitOrderContext(ctx, client, ticker, true, price, clientOrderID)
+}
+
 func PlaceLimitOrderSell(client *Client, ticker Ticker, price float64, clientOrderID string) (*orders.OrderState, error) {
 	return placeLimitOrder(client, ticker, false, price, clientOrderID)
+}
+
+// PlaceLimitOrderSellContext отправляет лимитную продажу с ctx вызывающего кода.
+func PlaceLimitOrderSellContext(
+	ctx context.Context,
+	client *Client,
+	ticker Ticker,
+	price float64,
+	clientOrderID string,
+) (*orders.OrderState, error) {
+	return placeLimitOrderContext(ctx, client, ticker, false, price, clientOrderID)
 }
